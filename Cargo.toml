@@ -9,6 +9,7 @@ path = "./src/bin/main.rs"
 
 [dependencies]
 critical-section = "1.2.0"
+embedded-graphics = "0.8.1"
 esp-backtrace = { version = "0.15.0", features = [
   "esp32c3",
   "exception-handler",
@@ -18,6 +19,7 @@ esp-backtrace = { version = "0.15.0", features = [
 esp-hal = { version = "0.23.1", features = ["esp32c3", "unstable"] }
 esp-println = { version = "0.13.0", features = ["esp32c3", "log"] }
 log = { version = "0.4.21" }
+ssd1306 = "0.9.0"
 
 [profile.dev]
 # Rust debug is too slow.
