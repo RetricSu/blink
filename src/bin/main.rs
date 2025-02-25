@@ -20,12 +20,10 @@ use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 #[main]
 fn main() -> ! {
     // generator version: 0.2.2
+    esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    let system = peripherals.SYSTEM.bt_lpck_div_frac();
-
-    esp_println::logger::init_logger_from_env();
 
     let sda = peripherals.GPIO8;
     let scl = peripherals.GPIO9;
@@ -43,22 +41,17 @@ fn main() -> ! {
         .into_buffered_graphics_mode();
     display.init().unwrap();
 
-    let text_style = MonoTextStyleBuilder::new()
-        .text_color(BinaryColor::On)
-        .build();
-    Text::with_baseline(
-        "Click stick\nto start! ",
-        Point::zero(),
-        text_style,
-        Baseline::Top,
-    )
-    .draw(&mut display)
-    .unwrap();
-    display.flush().unwrap();
+    let text_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
     let delay = Delay::new();
     loop {
         info!("Hello world!");
+        // 清屏并显示"Hello World!"
+        display.clear(BinaryColor::Off).unwrap();
+        Text::new("Hello World!", Point::new(10, 20), text_style)
+            .draw(&mut display)
+            .unwrap();
+        display.flush().unwrap();
         delay.delay_millis(500);
     }
 
