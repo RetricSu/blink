@@ -2,10 +2,9 @@
 #![no_main]
 
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyle, MonoTextStyleBuilder},
+    mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::BinaryColor,
     prelude::*,
-    text::Baseline,
     text::Text,
 };
 use esp_backtrace as _;
