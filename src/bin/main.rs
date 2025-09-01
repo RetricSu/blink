@@ -20,6 +20,33 @@ use esp_hal::time::RateExtU32;
 use log::info;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
+/// Formats a quote into displayable lines, wrapping at approximately 20 characters
+fn format_quote_lines(quote: &str) -> HVec<HString<32>, 8> {
+    let words: HVec<&str, 32> = quote.split_whitespace().collect();
+    let mut lines: HVec<HString<32>, 8> = HVec::new();
+    let mut current_line = HString::new();
+
+    for word in words {
+        if current_line.len() + word.len() < 20 {
+            // ~20 chars per line
+            if !current_line.is_empty() {
+                current_line.push(' ').unwrap();
+            }
+            current_line.push_str(word).unwrap();
+        } else {
+            if !current_line.is_empty() {
+                lines.push(current_line.clone()).unwrap();
+            }
+            current_line = HString::from(word);
+        }
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line).unwrap();
+    }
+
+    lines
+}
+
 #[main]
 fn main() -> ! {
     // generator version: 0.2.2
@@ -97,27 +124,7 @@ fn main() -> ! {
 
                 if let Some(quote) = &gadget.current_quote {
                     // Split quote into lines for display
-                    let words: HVec<&str, 32> = quote.split_whitespace().collect();
-                    let mut lines: HVec<HString<32>, 8> = HVec::new();
-                    let mut current_line = HString::new();
-
-                    for word in words {
-                        if current_line.len() + word.len() < 20 {
-                            // ~20 chars per line
-                            if !current_line.is_empty() {
-                                current_line.push(' ').unwrap();
-                            }
-                            current_line.push_str(word).unwrap();
-                        } else {
-                            if !current_line.is_empty() {
-                                lines.push(current_line.clone()).unwrap();
-                            }
-                            current_line = HString::from(word);
-                        }
-                    }
-                    if !current_line.is_empty() {
-                        lines.push(current_line).unwrap();
-                    }
+                    let lines = format_quote_lines(quote);
 
                     // Display lines
                     for (i, line) in lines.iter().take(4).enumerate() {
