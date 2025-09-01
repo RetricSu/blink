@@ -74,6 +74,26 @@ fn format_time(total_seconds: u32) -> HString<16> {
     time_str
 }
 
+/// Formats countdown seconds into MM:SS format
+fn format_countdown(total_seconds: u32) -> HString<16> {
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+
+    let mut countdown_str = HString::new();
+    // Format as MM:SS
+    if minutes < 10 {
+        countdown_str.push('0').unwrap();
+    }
+    write!(&mut countdown_str, "{}:", minutes).unwrap();
+
+    if seconds < 10 {
+        countdown_str.push('0').unwrap();
+    }
+    write!(&mut countdown_str, "{}", seconds).unwrap();
+
+    countdown_str
+}
+
 #[main]
 fn main() -> ! {
     // generator version: 0.2.2
@@ -132,6 +152,10 @@ fn main() -> ! {
         // Update time tracking every 10 iterations (approximately every second)
         if counter % 10 == 0 {
             seconds_elapsed += 1;
+            // Also tick countdown if we're in countdown mode
+            if gadget.state == State::DisplayingCountdown {
+                gadget.tick_countdown();
+            }
         }
 
         // Handle state transitions
@@ -244,7 +268,7 @@ fn main() -> ! {
                 }
 
                 if let Err(e) =
-                    Text::new("Press for time", Point::new(10, 24), text_style).draw(&mut display)
+                    Text::new("Press countdown", Point::new(5, 24), text_style).draw(&mut display)
                 {
                     info!("Failed to draw text: {:?}", e);
                     continue;
@@ -268,6 +292,57 @@ fn main() -> ! {
                 }
                 if !flush_success {
                     info!("All flush attempts failed for quote display");
+                }
+            }
+
+            State::DisplayingCountdown => {
+                info!("Displaying countdown: {}", gadget.countdown_seconds);
+                if let Err(e) = display.clear(BinaryColor::Off) {
+                    info!("Failed to clear display: {:?}", e);
+                    continue;
+                }
+
+                // Display "COUNTDOWN" label
+                if let Err(e) =
+                    Text::new("COUNTDOWN", Point::new(25, 10), text_style).draw(&mut display)
+                {
+                    info!("Failed to draw countdown label: {:?}", e);
+                    continue;
+                }
+
+                // Format and display the countdown time
+                let countdown_string = format_countdown(gadget.countdown_seconds);
+                if let Err(e) =
+                    Text::new(&countdown_string, Point::new(35, 22), text_style).draw(&mut display)
+                {
+                    info!("Failed to draw countdown time: {:?}", e);
+                    continue;
+                }
+
+                // Flush with retry logic
+                let mut flush_success = false;
+                for attempt in 1..=3 {
+                    match display.flush() {
+                        Ok(_) => {
+                            flush_success = true;
+                            break;
+                        }
+                        Err(e) => {
+                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
+                            if attempt < 3 {
+                                delay.delay_millis(10);
+                            }
+                        }
+                    }
+                }
+                if !flush_success {
+                    info!("All flush attempts failed for countdown display");
+                }
+
+                // Check if countdown finished
+                if gadget.countdown_seconds == 0 {
+                    info!("Countdown finished!");
+                    // Could add a beep or notification here
                 }
             }
         }

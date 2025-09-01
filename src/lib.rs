@@ -8,6 +8,7 @@ pub enum State {
     DisplayingTime,
     DisplayingQuote,
     FetchingQuote,
+    DisplayingCountdown,
 }
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,8 @@ pub enum Event {
     ButtonPress,
     QuoteReceived(HString<128>), // Event can carry data!
     FetchFailed,
+    CountdownTick,
+    CountdownFinished,
 }
 
 // 2. Create a struct for your gadget
@@ -23,6 +26,8 @@ pub struct SmartGadget {
     pub current_quote: Option<HString<128>>,
     pub quotes: &'static [&'static str],
     pub current_quote_index: usize,
+    pub countdown_seconds: u32,
+    pub countdown_original: u32,
 }
 
 // 3. Implement a method to handle events
@@ -48,6 +53,8 @@ impl SmartGadget {
                 "Everything you've ever wanted is on the other side of fear.",
             ],
             current_quote_index: 0,
+            countdown_seconds: 0,
+            countdown_original: 0,
         }
     }
 
@@ -68,8 +75,30 @@ impl SmartGadget {
 
             // If we're showing a quote and the button is pressed...
             (State::DisplayingQuote, Event::ButtonPress) => {
+                self.start_countdown(30); // Start 30-second countdown
+                self.state = State::DisplayingCountdown;
+                // ACTION: Switch to countdown mode
+            }
+
+            // If we're in countdown and button is pressed...
+            (State::DisplayingCountdown, Event::ButtonPress) => {
                 self.state = State::DisplayingTime;
-                // ACTION: Clear screen and show the time
+                // ACTION: Go back to time mode
+            }
+
+            // Countdown tick event
+            (State::DisplayingCountdown, Event::CountdownTick) => {
+                if self.countdown_seconds > 0 {
+                    self.countdown_seconds -= 1;
+                } else {
+                    self.handle_event(Event::CountdownFinished);
+                }
+            }
+
+            // Countdown finished
+            (State::DisplayingCountdown, Event::CountdownFinished) => {
+                self.state = State::DisplayingTime;
+                // ACTION: Countdown finished, return to time
             }
 
             // You can handle error cases, too
@@ -93,5 +122,14 @@ impl SmartGadget {
         // Simulate fetching a quote (in real implementation, this would be async)
         let quote = self.get_next_quote();
         self.handle_event(Event::QuoteReceived(quote));
+    }
+
+    pub fn start_countdown(&mut self, seconds: u32) {
+        self.countdown_seconds = seconds;
+        self.countdown_original = seconds;
+    }
+
+    pub fn tick_countdown(&mut self) {
+        self.handle_event(Event::CountdownTick);
     }
 }
