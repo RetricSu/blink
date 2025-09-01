@@ -58,18 +58,29 @@ fn main() -> ! {
     let sda = peripherals.GPIO8;
     let scl = peripherals.GPIO9;
 
-    let i2c = I2c::new(
-        peripherals.I2C0,
-        esp_hal::i2c::master::Config::default().with_frequency(100u32.Hz()),
-    )
-    .unwrap()
-    .with_scl(scl)
-    .with_sda(sda);
+    // Create I2C with proper configuration
+    let i2c_config = esp_hal::i2c::master::Config::default()
+        .with_frequency(100u32.kHz()); // Try 100 kHz for better compatibility
 
+    let i2c = I2c::new(peripherals.I2C0, i2c_config)
+        .unwrap()
+        .with_scl(scl)
+        .with_sda(sda);
+
+    info!("Initializing I2C display...");
+    
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    display.init().unwrap();
+    
+    // Initialize display with error handling
+    match display.init() {
+        Ok(_) => info!("Display initialized successfully"),
+        Err(e) => {
+            info!("Failed to initialize display: {:?}", e);
+            // Continue anyway, but log the error
+        }
+    }
 
     let text_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let delay = Delay::new();
@@ -95,23 +106,44 @@ fn main() -> ! {
         match gadget.state {
             State::DisplayingTime => {
                 info!("Displaying time");
-                display.clear(BinaryColor::Off).unwrap();
-                Text::new("Time Mode", Point::new(10, 20), text_style)
-                    .draw(&mut display)
-                    .unwrap();
-                Text::new("Press for quote", Point::new(10, 35), text_style)
-                    .draw(&mut display)
-                    .unwrap();
-                display.flush().unwrap();
+                if let Err(e) = display.clear(BinaryColor::Off) {
+                    info!("Failed to clear display: {:?}", e);
+                    continue;
+                }
+                
+                if let Err(e) = Text::new("Time Mode", Point::new(10, 20), text_style)
+                    .draw(&mut display) {
+                    info!("Failed to draw text: {:?}", e);
+                    continue;
+                }
+                
+                if let Err(e) = Text::new("Press for quote", Point::new(10, 35), text_style)
+                    .draw(&mut display) {
+                    info!("Failed to draw text: {:?}", e);
+                    continue;
+                }
+                
+                if let Err(e) = display.flush() {
+                    info!("Failed to flush display: {:?}", e);
+                }
             }
 
             State::FetchingQuote => {
                 info!("Fetching quote");
-                display.clear(BinaryColor::Off).unwrap();
-                Text::new("Loading...", Point::new(10, 20), text_style)
-                    .draw(&mut display)
-                    .unwrap();
-                display.flush().unwrap();
+                if let Err(e) = display.clear(BinaryColor::Off) {
+                    info!("Failed to clear display: {:?}", e);
+                    continue;
+                }
+                
+                if let Err(e) = Text::new("Loading...", Point::new(10, 20), text_style)
+                    .draw(&mut display) {
+                    info!("Failed to draw text: {:?}", e);
+                    continue;
+                }
+                
+                if let Err(e) = display.flush() {
+                    info!("Failed to flush display: {:?}", e);
+                }
 
                 // Simulate quote fetching
                 delay.delay_millis(1000);
@@ -120,7 +152,10 @@ fn main() -> ! {
 
             State::DisplayingQuote => {
                 info!("Displaying quote: {:?}", gadget.current_quote);
-                display.clear(BinaryColor::Off).unwrap();
+                if let Err(e) = display.clear(BinaryColor::Off) {
+                    info!("Failed to clear display: {:?}", e);
+                    continue;
+                }
 
                 if let Some(quote) = &gadget.current_quote {
                     // Split quote into lines for display
@@ -129,16 +164,23 @@ fn main() -> ! {
                     // Display lines
                     for (i, line) in lines.iter().take(4).enumerate() {
                         // Max 4 lines
-                        Text::new(line, Point::new(5, 15 + ((i as i32) * 12)), text_style)
-                            .draw(&mut display)
-                            .unwrap();
+                        if let Err(e) = Text::new(line, Point::new(5, 15 + ((i as i32) * 12)), text_style)
+                            .draw(&mut display) {
+                            info!("Failed to draw quote line {}: {:?}", i, e);
+                            continue;
+                        }
                     }
                 }
 
-                Text::new("Press for time", Point::new(10, 55), text_style)
-                    .draw(&mut display)
-                    .unwrap();
-                display.flush().unwrap();
+                if let Err(e) = Text::new("Press for time", Point::new(10, 55), text_style)
+                    .draw(&mut display) {
+                    info!("Failed to draw text: {:?}", e);
+                    continue;
+                }
+                
+                if let Err(e) = display.flush() {
+                    info!("Failed to flush display: {:?}", e);
+                }
             }
         }
 
