@@ -42,6 +42,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f68f53c83ab957f72c32642f3868eec03eb974d1fb82e453128456482613d36"
 
 [[package]]
+name = "blink"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embedded-graphics",
+ "esp-backtrace",
+ "esp-hal",
+ "esp-println",
+ "log",
+ "ssd1306",
+]
+
+[[package]]
 name = "byte-slice-cast"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -712,19 +725,6 @@ name = "nb"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
-
-[[package]]
-name = "nostr-card"
-version = "0.1.0"
-dependencies = [
- "critical-section",
- "embedded-graphics",
- "esp-backtrace",
- "esp-hal",
- "esp-println",
- "log",
- "ssd1306",
-]
 
 [[package]]
 name = "num-traits"

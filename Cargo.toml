@@ -1,10 +1,10 @@
 [package]
 edition = "2021"
-name    = "nostr-card"
+name    = "blink"
 version = "0.1.0"
 
 [[bin]]
-name = "nostr-card"
+name = "blink"
 path = "./src/bin/main.rs"
 
 [dependencies]
