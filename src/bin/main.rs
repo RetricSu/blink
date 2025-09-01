@@ -59,8 +59,7 @@ fn main() -> ! {
     let scl = peripherals.GPIO9;
 
     // Create I2C with proper configuration
-    let i2c_config = esp_hal::i2c::master::Config::default()
-        .with_frequency(100u32.kHz()); // Try 100 kHz for better compatibility
+    let i2c_config = esp_hal::i2c::master::Config::default().with_frequency(100u32.kHz()); // Try 100 kHz for better compatibility
 
     let i2c = I2c::new(peripherals.I2C0, i2c_config)
         .unwrap()
@@ -68,11 +67,11 @@ fn main() -> ! {
         .with_sda(sda);
 
     info!("Initializing I2C display...");
-    
+
     let interface = I2CDisplayInterface::new(i2c);
-    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+    let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    
+
     // Initialize display with error handling
     match display.init() {
         Ok(_) => info!("Display initialized successfully"),
@@ -110,21 +109,39 @@ fn main() -> ! {
                     info!("Failed to clear display: {:?}", e);
                     continue;
                 }
-                
-                if let Err(e) = Text::new("Time Mode", Point::new(10, 20), text_style)
-                    .draw(&mut display) {
+
+                if let Err(e) =
+                    Text::new("Time Mode", Point::new(10, 12), text_style).draw(&mut display)
+                {
                     info!("Failed to draw text: {:?}", e);
                     continue;
                 }
-                
-                if let Err(e) = Text::new("Press for quote", Point::new(10, 35), text_style)
-                    .draw(&mut display) {
+
+                if let Err(e) =
+                    Text::new("Press for quote", Point::new(10, 24), text_style).draw(&mut display)
+                {
                     info!("Failed to draw text: {:?}", e);
                     continue;
                 }
-                
-                if let Err(e) = display.flush() {
-                    info!("Failed to flush display: {:?}", e);
+
+                // Flush with retry logic
+                let mut flush_success = false;
+                for attempt in 1..=3 {
+                    match display.flush() {
+                        Ok(_) => {
+                            flush_success = true;
+                            break;
+                        }
+                        Err(e) => {
+                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
+                            if attempt < 3 {
+                                delay.delay_millis(10);
+                            }
+                        }
+                    }
+                }
+                if !flush_success {
+                    info!("All flush attempts failed for time display");
                 }
             }
 
@@ -134,15 +151,32 @@ fn main() -> ! {
                     info!("Failed to clear display: {:?}", e);
                     continue;
                 }
-                
-                if let Err(e) = Text::new("Loading...", Point::new(10, 20), text_style)
-                    .draw(&mut display) {
+
+                if let Err(e) =
+                    Text::new("Loading...", Point::new(10, 16), text_style).draw(&mut display)
+                {
                     info!("Failed to draw text: {:?}", e);
                     continue;
                 }
-                
-                if let Err(e) = display.flush() {
-                    info!("Failed to flush display: {:?}", e);
+
+                // Flush with retry logic
+                let mut flush_success = false;
+                for attempt in 1..=3 {
+                    match display.flush() {
+                        Ok(_) => {
+                            flush_success = true;
+                            break;
+                        }
+                        Err(e) => {
+                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
+                            if attempt < 3 {
+                                delay.delay_millis(10);
+                            }
+                        }
+                    }
+                }
+                if !flush_success {
+                    info!("All flush attempts failed for loading display");
                 }
 
                 // Simulate quote fetching
@@ -161,25 +195,44 @@ fn main() -> ! {
                     // Split quote into lines for display
                     let lines = format_quote_lines(quote);
 
-                    // Display lines
-                    for (i, line) in lines.iter().take(4).enumerate() {
-                        // Max 4 lines
-                        if let Err(e) = Text::new(line, Point::new(5, 15 + ((i as i32) * 12)), text_style)
-                            .draw(&mut display) {
+                    // Display lines (only 2 lines for 128x32 display)
+                    for (i, line) in lines.iter().take(2).enumerate() {
+                        // Max 2 lines for 32px height
+                        if let Err(e) =
+                            Text::new(line, Point::new(5, 12 + ((i as i32) * 10)), text_style)
+                                .draw(&mut display)
+                        {
                             info!("Failed to draw quote line {}: {:?}", i, e);
                             continue;
                         }
                     }
                 }
 
-                if let Err(e) = Text::new("Press for time", Point::new(10, 55), text_style)
-                    .draw(&mut display) {
+                if let Err(e) =
+                    Text::new("Press for time", Point::new(10, 24), text_style).draw(&mut display)
+                {
                     info!("Failed to draw text: {:?}", e);
                     continue;
                 }
-                
-                if let Err(e) = display.flush() {
-                    info!("Failed to flush display: {:?}", e);
+
+                // Flush with retry logic
+                let mut flush_success = false;
+                for attempt in 1..=3 {
+                    match display.flush() {
+                        Ok(_) => {
+                            flush_success = true;
+                            break;
+                        }
+                        Err(e) => {
+                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
+                            if attempt < 3 {
+                                delay.delay_millis(10);
+                            }
+                        }
+                    }
+                }
+                if !flush_success {
+                    info!("All flush attempts failed for quote display");
                 }
             }
         }
