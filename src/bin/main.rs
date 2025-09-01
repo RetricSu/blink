@@ -2,6 +2,7 @@
 #![no_main]
 
 use blink::{Event, SmartGadget, State};
+use core::fmt::Write;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::BinaryColor,
@@ -45,6 +46,32 @@ fn format_quote_lines(quote: &str) -> HVec<HString<32>, 8> {
     }
 
     lines
+}
+
+/// Formats elapsed seconds into a time string (HH:MM:SS)
+fn format_time(total_seconds: u32) -> HString<16> {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    let mut time_str = HString::new();
+    // Format as HH:MM:SS
+    if hours < 10 {
+        time_str.push('0').unwrap();
+    }
+    write!(&mut time_str, "{}:", hours).unwrap();
+
+    if minutes < 10 {
+        time_str.push('0').unwrap();
+    }
+    write!(&mut time_str, "{}:", minutes).unwrap();
+
+    if seconds < 10 {
+        time_str.push('0').unwrap();
+    }
+    write!(&mut time_str, "{}", seconds).unwrap();
+
+    time_str
 }
 
 #[main]
@@ -91,6 +118,7 @@ fn main() -> ! {
     gadget.simulate_quote_fetch();
 
     let mut counter = 0;
+    let mut seconds_elapsed = 0u32; // Track seconds since boot
 
     loop {
         // Simulate button press every 5 seconds for demo
@@ -101,24 +129,31 @@ fn main() -> ! {
             gadget.handle_event(Event::ButtonPress);
         }
 
+        // Update time tracking every 10 iterations (approximately every second)
+        if counter % 10 == 0 {
+            seconds_elapsed += 1;
+        }
+
         // Handle state transitions
         match gadget.state {
             State::DisplayingTime => {
-                info!("Displaying time");
+                info!("Displaying time: {}", seconds_elapsed);
                 if let Err(e) = display.clear(BinaryColor::Off) {
                     info!("Failed to clear display: {:?}", e);
                     continue;
                 }
 
+                // Format and display the current time
+                let time_string = format_time(seconds_elapsed);
                 if let Err(e) =
-                    Text::new("Time Mode", Point::new(10, 12), text_style).draw(&mut display)
+                    Text::new(&time_string, Point::new(20, 12), text_style).draw(&mut display)
                 {
-                    info!("Failed to draw text: {:?}", e);
+                    info!("Failed to draw time: {:?}", e);
                     continue;
                 }
 
                 if let Err(e) =
-                    Text::new("Press for quote", Point::new(10, 24), text_style).draw(&mut display)
+                    Text::new("Press for quote", Point::new(5, 24), text_style).draw(&mut display)
                 {
                     info!("Failed to draw text: {:?}", e);
                     continue;
