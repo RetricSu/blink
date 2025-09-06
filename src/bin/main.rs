@@ -1,8 +1,7 @@
 #![no_std]
 #![no_main]
 
-use blink::{Event, SmartGadget, State};
-use core::fmt::Write;
+use blink::{util, Event, SmartGadget, State};
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::BinaryColor,
@@ -12,115 +11,12 @@ use embedded_graphics::{
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::delay::Delay;
-use heapless::String as HString;
-use heapless::Vec as HVec;
 
 use esp_hal::i2c::master::I2c;
 use esp_hal::main;
 use esp_hal::time::RateExtU32;
 use log::info;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
-
-/// Formats a quote into displayable lines, optimized for 128x32 display
-/// With 6x10 font: max 21 chars per line, max 3 lines total
-fn format_quote_lines(quote: &str) -> HVec<HString<64>, 8> {
-    let words: HVec<&str, 64> = quote.split_whitespace().collect();
-    let mut lines: HVec<HString<64>, 8> = HVec::new();
-    let mut current_line = HString::new();
-
-    for word in words {
-        // Skip words that are too long to fit on a single line
-        if word.len() > 20 {
-            // Truncate very long words to fit 128px width (21 chars max)
-            let truncated = if word.len() > 18 { &word[..18] } else { word };
-            if !current_line.is_empty() {
-                if lines.push(current_line.clone()).is_ok() {
-                    current_line = HString::from(truncated);
-                }
-            } else {
-                current_line = HString::from(truncated);
-            }
-            continue;
-        }
-
-        // Account for space character when checking length
-        let space_needed = if current_line.is_empty() { 0 } else { 1 };
-        if current_line.len() + space_needed + word.len() <= 20 {
-            // ~20 chars per line to fit 128px width with 6x10 font
-            if !current_line.is_empty() && current_line.push(' ').is_err() {
-                // If we can't add space, push current line and start new one
-                if lines.push(current_line.clone()).is_ok() {
-                    current_line = HString::new();
-                    let _ = current_line.push_str(word);
-                }
-                continue;
-            }
-            if current_line.push_str(word).is_err() {
-                // If we can't add word, push current line and start new one
-                if lines.push(current_line.clone()).is_ok() {
-                    current_line = HString::from(word);
-                }
-            }
-        } else {
-            if !current_line.is_empty() && lines.push(current_line.clone()).is_err() {
-                // If we can't add more lines, break
-                break;
-            }
-            current_line = HString::from(word);
-        }
-    }
-    if !current_line.is_empty() {
-        let _ = lines.push(current_line);
-    }
-
-    lines
-}
-
-/// Formats elapsed seconds into a time string (HH:MM:SS)
-fn format_time(total_seconds: u32) -> HString<16> {
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-
-    let mut time_str = HString::new();
-    // Format as HH:MM:SS
-    if hours < 10 {
-        time_str.push('0').unwrap();
-    }
-    write!(&mut time_str, "{}:", hours).unwrap();
-
-    if minutes < 10 {
-        time_str.push('0').unwrap();
-    }
-    write!(&mut time_str, "{}:", minutes).unwrap();
-
-    if seconds < 10 {
-        time_str.push('0').unwrap();
-    }
-    write!(&mut time_str, "{}", seconds).unwrap();
-
-    time_str
-}
-
-/// Formats countdown seconds into MM:SS format
-fn format_countdown(total_seconds: u32) -> HString<16> {
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-
-    let mut countdown_str = HString::new();
-    // Format as MM:SS
-    if minutes < 10 {
-        countdown_str.push('0').unwrap();
-    }
-    write!(&mut countdown_str, "{}:", minutes).unwrap();
-
-    if seconds < 10 {
-        countdown_str.push('0').unwrap();
-    }
-    write!(&mut countdown_str, "{}", seconds).unwrap();
-
-    countdown_str
-}
 
 #[main]
 fn main() -> ! {
@@ -196,7 +92,7 @@ fn main() -> ! {
                 }
 
                 // Format and display the current time - centered for 128x32 screen
-                let time_string = format_time(seconds_elapsed);
+                let time_string = util::format_time(seconds_elapsed, true);
                 if let Err(e) =
                     Text::new(&time_string, Point::new(30, 8), text_style).draw(&mut display)
                 {
@@ -280,7 +176,7 @@ fn main() -> ! {
 
                 if let Some(quote) = &gadget.current_quote {
                     // Split quote into lines for display
-                    let lines = format_quote_lines(quote);
+                    let lines = util::format_quote_lines(quote, 20, 8);
 
                     // Auto-scroll through long quotes every 4 seconds for better readability
                     if counter % 40 == 0 && lines.len() > 3 {
@@ -382,7 +278,7 @@ fn main() -> ! {
                 }
 
                 // Format and display the countdown time
-                let countdown_string = format_countdown(gadget.countdown_seconds);
+                let countdown_string = util::format_countdown(gadget.countdown_seconds, false);
                 if let Err(e) =
                     Text::new(&countdown_string, Point::new(35, 22), text_style).draw(&mut display)
                 {

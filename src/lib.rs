@@ -1,6 +1,8 @@
 #![no_std]
 
+use core::fmt::Write;
 use heapless::String as HString;
+use heapless::Vec as HVec;
 
 // 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
@@ -141,5 +143,150 @@ impl SmartGadget {
         if total_lines > 3 {
             self.quote_line_offset = (self.quote_line_offset + 1) % (total_lines - 2);
         }
+    }
+}
+
+/// Utility functions for formatting text and time
+pub mod util {
+    use super::*;
+
+    /// Formats a quote into displayable lines with configurable parameters
+    ///
+    /// # Arguments
+    /// * `quote` - The quote text to format
+    /// * `max_chars_per_line` - Maximum characters per line (default: 20)
+    /// * `max_lines` - Maximum number of lines to generate (default: 8)
+    pub fn format_quote_lines(
+        quote: &str,
+        max_chars_per_line: usize,
+        max_lines: usize,
+    ) -> HVec<HString<64>, 8> {
+        let words: HVec<&str, 64> = quote.split_whitespace().collect();
+        let mut lines: HVec<HString<64>, 8> = HVec::new();
+        let mut current_line = HString::new();
+
+        for word in words {
+            // Skip words that are too long to fit on a single line
+            if word.len() > max_chars_per_line {
+                // Truncate very long words to fit the specified width
+                let truncated = if word.len() > max_chars_per_line - 2 {
+                    &word[..max_chars_per_line - 2]
+                } else {
+                    word
+                };
+                if !current_line.is_empty() {
+                    if lines.push(current_line.clone()).is_ok() {
+                        current_line = HString::from(truncated);
+                    }
+                } else {
+                    current_line = HString::from(truncated);
+                }
+                continue;
+            }
+
+            // Account for space character when checking length
+            let space_needed = if current_line.is_empty() { 0 } else { 1 };
+            if current_line.len() + space_needed + word.len() <= max_chars_per_line {
+                // Add word to current line
+                if !current_line.is_empty() && current_line.push(' ').is_err() {
+                    // If we can't add space, push current line and start new one
+                    if lines.push(current_line.clone()).is_ok() {
+                        current_line = HString::new();
+                        let _ = current_line.push_str(word);
+                    }
+                    continue;
+                }
+                if current_line.push_str(word).is_err() {
+                    // If we can't add word, push current line and start new one
+                    if lines.push(current_line.clone()).is_ok() {
+                        current_line = HString::from(word);
+                    }
+                }
+            } else {
+                if !current_line.is_empty() && lines.push(current_line.clone()).is_err() {
+                    // If we can't add more lines, break
+                    break;
+                }
+                current_line = HString::from(word);
+            }
+
+            // Check if we've reached the maximum number of lines
+            if lines.len() >= max_lines {
+                break;
+            }
+        }
+        if !current_line.is_empty() && lines.len() < max_lines {
+            let _ = lines.push(current_line);
+        }
+
+        lines
+    }
+
+    /// Formats elapsed seconds into a time string with configurable format
+    ///
+    /// # Arguments
+    /// * `total_seconds` - Total seconds to format
+    /// * `show_hours` - Whether to include hours in the format (true: HH:MM:SS, false: MM:SS)
+    pub fn format_time(total_seconds: u32, show_hours: bool) -> HString<16> {
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+
+        let mut time_str = HString::new();
+
+        if show_hours {
+            // Format as HH:MM:SS
+            if hours < 10 {
+                time_str.push('0').unwrap();
+            }
+            write!(&mut time_str, "{}:", hours).unwrap();
+        }
+
+        if minutes < 10 {
+            time_str.push('0').unwrap();
+        }
+        write!(&mut time_str, "{}:", minutes).unwrap();
+
+        if seconds < 10 {
+            time_str.push('0').unwrap();
+        }
+        write!(&mut time_str, "{}", seconds).unwrap();
+
+        time_str
+    }
+
+    /// Formats countdown seconds into time format with configurable display
+    ///
+    /// # Arguments
+    /// * `total_seconds` - Total seconds for countdown
+    /// * `show_hours` - Whether to include hours in the format (true: HH:MM:SS, false: MM:SS)
+    pub fn format_countdown(total_seconds: u32, show_hours: bool) -> HString<16> {
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+
+        let mut countdown_str = HString::new();
+
+        if show_hours {
+            // Format as HH:MM:SS
+            if hours < 10 {
+                countdown_str.push('0').unwrap();
+            }
+            write!(&mut countdown_str, "{}:", hours).unwrap();
+        }
+
+        // Format minutes
+        if minutes < 10 {
+            countdown_str.push('0').unwrap();
+        }
+        write!(&mut countdown_str, "{}:", minutes).unwrap();
+
+        // Format seconds
+        if seconds < 10 {
+            countdown_str.push('0').unwrap();
+        }
+        write!(&mut countdown_str, "{}", seconds).unwrap();
+
+        countdown_str
     }
 }
