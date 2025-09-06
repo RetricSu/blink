@@ -20,6 +20,15 @@ use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
 #[main]
 fn main() -> ! {
+    macro_rules! draw_text {
+        ($display:expr, $text:expr, $point:expr, $style:expr, $err_msg:expr) => {
+            if let Err(e) = Text::new($text, $point, $style).draw(&mut $display) {
+                info!(concat!($err_msg, ": {:?}"), e);
+                continue;
+            }
+        };
+    }
+
     // generator version: 0.2.2
     esp_println::logger::init_logger_from_env();
 
@@ -93,19 +102,21 @@ fn main() -> ! {
 
                 // Format and display the current time - centered for 128x32 screen
                 let time_string = util::format_time(seconds_elapsed, true);
-                if let Err(e) =
-                    Text::new(&time_string, Point::new(30, 8), text_style).draw(&mut display)
-                {
-                    info!("Failed to draw time: {:?}", e);
-                    continue;
-                }
+                draw_text!(
+                    display,
+                    &time_string,
+                    Point::new(30, 8),
+                    text_style,
+                    "Failed to draw time"
+                );
 
-                if let Err(e) =
-                    Text::new("Press for quote", Point::new(2, 22), text_style).draw(&mut display)
-                {
-                    info!("Failed to draw text: {:?}", e);
-                    continue;
-                }
+                draw_text!(
+                    display,
+                    "Press for quote",
+                    Point::new(2, 22),
+                    text_style,
+                    "Failed to draw text"
+                );
 
                 // Flush with retry logic
                 let mut flush_success = false;
@@ -135,12 +146,13 @@ fn main() -> ! {
                     continue;
                 }
 
-                if let Err(e) =
-                    Text::new("Loading...", Point::new(30, 16), text_style).draw(&mut display)
-                {
-                    info!("Failed to draw text: {:?}", e);
-                    continue;
-                }
+                draw_text!(
+                    display,
+                    "Loading...",
+                    Point::new(30, 16),
+                    text_style,
+                    "Failed to draw text"
+                );
 
                 // Flush with retry logic
                 let mut flush_success = false;
@@ -187,57 +199,45 @@ fn main() -> ! {
                     let start_idx = gadget.quote_line_offset;
 
                     // Optimized layout for 128x32 screen with 6x10 font
-                    // Line 1: y=8 (leaves 2px margin from top)
-                    if let Some(first_line) = lines.get(start_idx) {
-                        if let Err(e) =
-                            Text::new(first_line, Point::new(2, 8), text_style).draw(&mut display)
-                        {
-                            info!("Failed to draw quote line: {:?}", e);
-                            continue;
-                        }
-                    }
-
-                    // Line 2: y=18 (10px spacing for 6x10 font)
-                    if let Some(second_line) = lines.get(start_idx + 1) {
-                        if let Err(e) =
-                            Text::new(second_line, Point::new(2, 18), text_style).draw(&mut display)
-                        {
-                            info!("Failed to draw second quote line: {:?}", e);
-                            continue;
-                        }
-                    }
-
-                    // Line 3: y=28 (only if we have space and no instruction needed)
-                    if lines.len() <= 3 {
-                        if let Some(third_line) = lines.get(start_idx + 2) {
-                            if let Err(e) = Text::new(third_line, Point::new(2, 28), text_style)
-                                .draw(&mut display)
-                            {
-                                info!("Failed to draw third quote line: {:?}", e);
-                                continue;
-                            }
-                        }
+                    let lines_to_display = if lines.len() > 3 { 2 } else { 3 };
+                    for (i, line) in lines
+                        .iter()
+                        .skip(start_idx)
+                        .take(lines_to_display)
+                        .enumerate()
+                    {
+                        // y=8 for first line, then +10 for each subsequent line
+                        let y = 8 + (i as i32 * 10);
+                        draw_text!(
+                            display,
+                            line,
+                            Point::new(2, y),
+                            text_style,
+                            "Failed to draw quote line"
+                        );
                     }
 
                     // Show scroll indicator if there are more than 3 lines
                     if lines.len() > 3 {
                         let indicator = "...";
-                        if let Err(e) =
-                            Text::new(indicator, Point::new(110, 28), text_style).draw(&mut display)
-                        {
-                            info!("Failed to draw scroll indicator: {:?}", e);
-                            continue;
-                        }
+                        draw_text!(
+                            display,
+                            indicator,
+                            Point::new(110, 28),
+                            text_style,
+                            "Failed to draw scroll indicator"
+                        );
                     }
 
                     // Show instruction only if we have 2 lines or less
                     if lines.len() <= 2 {
-                        if let Err(e) = Text::new("Press countdown", Point::new(2, 28), text_style)
-                            .draw(&mut display)
-                        {
-                            info!("Failed to draw instruction text: {:?}", e);
-                            continue;
-                        }
+                        draw_text!(
+                            display,
+                            "Press countdown",
+                            Point::new(2, 28),
+                            text_style,
+                            "Failed to draw instruction text"
+                        );
                     }
                 }
 
@@ -270,21 +270,23 @@ fn main() -> ! {
                 }
 
                 // Display "COUNTDOWN" label - centered for 128x32 screen
-                if let Err(e) =
-                    Text::new("COUNTDOWN", Point::new(20, 8), text_style).draw(&mut display)
-                {
-                    info!("Failed to draw countdown label: {:?}", e);
-                    continue;
-                }
+                draw_text!(
+                    display,
+                    "COUNTDOWN",
+                    Point::new(20, 8),
+                    text_style,
+                    "Failed to draw countdown label"
+                );
 
                 // Format and display the countdown time
                 let countdown_string = util::format_time(gadget.countdown_seconds, false);
-                if let Err(e) =
-                    Text::new(&countdown_string, Point::new(35, 22), text_style).draw(&mut display)
-                {
-                    info!("Failed to draw countdown time: {:?}", e);
-                    continue;
-                }
+                draw_text!(
+                    display,
+                    &countdown_string,
+                    Point::new(35, 22),
+                    text_style,
+                    "Failed to draw countdown time"
+                );
 
                 // Flush with retry logic
                 let mut flush_success = false;
