@@ -67,11 +67,9 @@ fn main() -> ! {
     // Initialize the state machine
     let mut gadget = SmartGadget::new();
 
-    // Start with displaying a quote
-    gadget.simulate_quote_fetch();
+    // Start with displaying a quote (already initialized in new())
 
     let mut counter = 0;
-    let mut seconds_elapsed = 0u32; // Track seconds since boot
 
     loop {
         // Simulate button press every 5 seconds for demo
@@ -82,103 +80,19 @@ fn main() -> ! {
             gadget.handle_event(Event::ButtonPress);
         }
 
-        // Update time tracking every 10 iterations (approximately every second)
-        if counter % 10 == 0 {
-            seconds_elapsed += 1;
-            // Also tick countdown if we're in countdown mode
-            if gadget.state == State::DisplayingCountdown {
-                gadget.tick_countdown();
-            }
+        // Start countdown after 3 quote cycles (15 seconds)
+        if counter == 150 {
+            info!("Starting countdown!");
+            gadget.handle_event(Event::StartCountdown);
+        }
+
+        // Tick countdown if we're in countdown mode every 10 iterations (approximately every second)
+        if counter % 10 == 0 && gadget.state == State::DisplayingCountdown {
+            gadget.tick_countdown();
         }
 
         // Handle state transitions
         match gadget.state {
-            State::DisplayingTime => {
-                info!("Displaying time: {}", seconds_elapsed);
-                if let Err(e) = display.clear(BinaryColor::Off) {
-                    info!("Failed to clear display: {:?}", e);
-                    continue;
-                }
-
-                // Format and display the current time - centered for 128x32 screen
-                let time_string = util::format_time(seconds_elapsed, true);
-                draw_text!(
-                    display,
-                    &time_string,
-                    Point::new(30, 8),
-                    text_style,
-                    "Failed to draw time"
-                );
-
-                draw_text!(
-                    display,
-                    "Press for quote",
-                    Point::new(2, 22),
-                    text_style,
-                    "Failed to draw text"
-                );
-
-                // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for time display");
-                }
-            }
-
-            State::FetchingQuote => {
-                info!("Fetching quote");
-                if let Err(e) = display.clear(BinaryColor::Off) {
-                    info!("Failed to clear display: {:?}", e);
-                    continue;
-                }
-
-                draw_text!(
-                    display,
-                    "Loading...",
-                    Point::new(30, 16),
-                    text_style,
-                    "Failed to draw text"
-                );
-
-                // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for loading display");
-                }
-
-                // Simulate quote fetching
-                delay.delay_millis(1000);
-                gadget.simulate_quote_fetch();
-            }
-
             State::DisplayingQuote => {
                 info!("Displaying quote: {:?}", gadget.current_quote);
                 if let Err(e) = display.clear(BinaryColor::Off) {
@@ -186,9 +100,9 @@ fn main() -> ! {
                     continue;
                 }
 
-                if let Some(quote) = &gadget.current_quote {
+                {
                     // Split quote into lines for display
-                    let lines = util::format_quote_lines(quote, 20, 8);
+                    let lines = util::format_quote_lines(&gadget.current_quote, 20, 8);
 
                     // Auto-scroll through long quotes every 4 seconds for better readability
                     if counter % 40 == 0 && lines.len() > 3 {
@@ -233,7 +147,7 @@ fn main() -> ! {
                     if lines.len() <= 2 {
                         draw_text!(
                             display,
-                            "Press countdown",
+                            "Press for next",
                             Point::new(2, 28),
                             text_style,
                             "Failed to draw instruction text"

@@ -7,17 +7,14 @@ use heapless::Vec as HVec;
 // 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {
-    DisplayingTime,
     DisplayingQuote,
-    FetchingQuote,
     DisplayingCountdown,
 }
 
 #[derive(Debug, Clone)]
 pub enum Event {
     ButtonPress,
-    QuoteReceived(HString<128>), // Event can carry data!
-    FetchFailed,
+    StartCountdown,
     CountdownTick,
     CountdownFinished,
 }
@@ -25,7 +22,7 @@ pub enum Event {
 // 2. Create a struct for your gadget
 pub struct SmartGadget {
     pub state: State,
-    pub current_quote: Option<HString<128>>,
+    pub current_quote: HString<128>,
     pub quotes: &'static [&'static str],
     pub current_quote_index: usize,
     pub countdown_seconds: u32,
@@ -42,19 +39,20 @@ impl Default for SmartGadget {
 
 impl SmartGadget {
     pub fn new() -> Self {
+        let quotes = &[
+            "The only way to do great work is to love what you do.",
+            "Life is what happens when you're busy making other plans.",
+            "Success is not final, failure is not fatal: it is the courage to continue that counts.",
+            "The future belongs to those who believe in the beauty of their dreams.",
+            "In the middle of difficulty lies opportunity.",
+            "Don't watch the clock; do what it does. Keep going.",
+            "The best way to predict the future is to invent it.",
+            "Everything you've ever wanted is on the other side of fear.",
+        ];
         Self {
-            state: State::DisplayingTime,
-            current_quote: None,
-            quotes: &[
-                "The only way to do great work is to love what you do.",
-                "Life is what happens when you're busy making other plans.",
-                "Success is not final, failure is not fatal: it is the courage to continue that counts.",
-                "The future belongs to those who believe in the beauty of their dreams.",
-                "In the middle of difficulty lies opportunity.",
-                "Don't watch the clock; do what it does. Keep going.",
-                "The best way to predict the future is to invent it.",
-                "Everything you've ever wanted is on the other side of fear.",
-            ],
+            state: State::DisplayingQuote,
+            current_quote: HString::from(quotes[0]),
+            quotes,
             current_quote_index: 0,
             countdown_seconds: 0,
             countdown_original: 0,
@@ -64,22 +62,14 @@ impl SmartGadget {
 
     pub fn handle_event(&mut self, event: Event) {
         match (&self.state, event) {
-            // If we're showing time and the button is pressed...
-            (State::DisplayingTime, Event::ButtonPress) => {
-                self.state = State::FetchingQuote;
-                // ACTION: Start the network request, show "Loading..."
-            }
-
-            // If we're fetching a quote and it arrives...
-            (State::FetchingQuote, Event::QuoteReceived(quote)) => {
-                self.current_quote = Some(quote);
-                self.quote_line_offset = 0; // Reset scroll position for new quote
-                self.state = State::DisplayingQuote;
-                // ACTION: Display the new quote on the screen
-            }
-
             // If we're showing a quote and the button is pressed...
             (State::DisplayingQuote, Event::ButtonPress) => {
+                self.switch_to_next_quote(); // Switch to next quote
+                                             // ACTION: Display the new quote
+            }
+
+            // If we want to start countdown...
+            (State::DisplayingQuote, Event::StartCountdown) => {
                 self.start_countdown(30); // Start 30-second countdown
                 self.state = State::DisplayingCountdown;
                 // ACTION: Switch to countdown mode
@@ -87,8 +77,8 @@ impl SmartGadget {
 
             // If we're in countdown and button is pressed...
             (State::DisplayingCountdown, Event::ButtonPress) => {
-                self.state = State::DisplayingTime;
-                // ACTION: Go back to time mode
+                self.state = State::DisplayingQuote;
+                // ACTION: Go back to quote mode
             }
 
             // Countdown tick event
@@ -102,14 +92,8 @@ impl SmartGadget {
 
             // Countdown finished
             (State::DisplayingCountdown, Event::CountdownFinished) => {
-                self.state = State::DisplayingTime;
-                // ACTION: Countdown finished, return to time
-            }
-
-            // You can handle error cases, too
-            (State::FetchingQuote, Event::FetchFailed) => {
-                self.state = State::DisplayingTime;
-                // ACTION: Show an error icon, then switch to time
+                self.state = State::DisplayingQuote;
+                // ACTION: Countdown finished, return to quote
             }
 
             // Catch-all for unhandled combinations
@@ -123,10 +107,9 @@ impl SmartGadget {
         HString::from(quote)
     }
 
-    pub fn simulate_quote_fetch(&mut self) {
-        // Simulate fetching a quote (in real implementation, this would be async)
-        let quote = self.get_next_quote();
-        self.handle_event(Event::QuoteReceived(quote));
+    pub fn switch_to_next_quote(&mut self) {
+        self.current_quote = self.get_next_quote();
+        self.quote_line_offset = 0; // Reset scroll position for new quote
     }
 
     pub fn start_countdown(&mut self, seconds: u32) {
