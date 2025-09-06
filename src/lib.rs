@@ -137,9 +137,9 @@ impl SmartGadget {
     }
 
     pub fn scroll_quote(&mut self, total_lines: usize) {
-        // Scroll through quote lines, showing 2 lines at a time
-        if total_lines > 2 {
-            self.quote_line_offset = (self.quote_line_offset + 1) % (total_lines - 1);
+        // Scroll through quote lines, showing 3 lines at a time for 128x32 screen
+        if total_lines > 3 {
+            self.quote_line_offset = (self.quote_line_offset + 1) % (total_lines - 2);
         }
     }
 }

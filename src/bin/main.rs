@@ -21,8 +21,8 @@ use esp_hal::time::RateExtU32;
 use log::info;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
-/// Formats a quote into displayable lines, wrapping at approximately 18 characters
-/// to fit better on the 128x32 display
+/// Formats a quote into displayable lines, optimized for 128x32 display
+/// With 6x10 font: max 21 chars per line, max 3 lines total
 fn format_quote_lines(quote: &str) -> HVec<HString<64>, 8> {
     let words: HVec<&str, 64> = quote.split_whitespace().collect();
     let mut lines: HVec<HString<64>, 8> = HVec::new();
@@ -30,9 +30,9 @@ fn format_quote_lines(quote: &str) -> HVec<HString<64>, 8> {
 
     for word in words {
         // Skip words that are too long to fit on a single line
-        if word.len() > 18 {
-            // Truncate very long words
-            let truncated = if word.len() > 15 { &word[..15] } else { word };
+        if word.len() > 20 {
+            // Truncate very long words to fit 128px width (21 chars max)
+            let truncated = if word.len() > 18 { &word[..18] } else { word };
             if !current_line.is_empty() {
                 if let Ok(_) = lines.push(current_line.clone()) {
                     current_line = HString::from(truncated);
@@ -45,8 +45,8 @@ fn format_quote_lines(quote: &str) -> HVec<HString<64>, 8> {
 
         // Account for space character when checking length
         let space_needed = if current_line.is_empty() { 0 } else { 1 };
-        if current_line.len() + space_needed + word.len() <= 18 {
-            // ~18 chars per line to fit better on 128px width
+        if current_line.len() + space_needed + word.len() <= 20 {
+            // ~20 chars per line to fit 128px width with 6x10 font
             if !current_line.is_empty() {
                 if let Err(_) = current_line.push(' ') {
                     // If we can't add space, push current line and start new one
@@ -199,17 +199,17 @@ fn main() -> ! {
                     continue;
                 }
 
-                // Format and display the current time
+                // Format and display the current time - centered for 128x32 screen
                 let time_string = format_time(seconds_elapsed);
                 if let Err(e) =
-                    Text::new(&time_string, Point::new(25, 10), text_style).draw(&mut display)
+                    Text::new(&time_string, Point::new(30, 8), text_style).draw(&mut display)
                 {
                     info!("Failed to draw time: {:?}", e);
                     continue;
                 }
 
                 if let Err(e) =
-                    Text::new("Press for quote", Point::new(2, 24), text_style).draw(&mut display)
+                    Text::new("Press for quote", Point::new(2, 22), text_style).draw(&mut display)
                 {
                     info!("Failed to draw text: {:?}", e);
                     continue;
@@ -244,7 +244,7 @@ fn main() -> ! {
                 }
 
                 if let Err(e) =
-                    Text::new("Loading...", Point::new(25, 16), text_style).draw(&mut display)
+                    Text::new("Loading...", Point::new(30, 16), text_style).draw(&mut display)
                 {
                     info!("Failed to draw text: {:?}", e);
                     continue;
@@ -286,52 +286,65 @@ fn main() -> ! {
                     // Split quote into lines for display
                     let lines = format_quote_lines(quote);
 
-                    // Auto-scroll through long quotes every 3 seconds
-                    if counter % 30 == 0 && lines.len() > 2 {
+                    // Auto-scroll through long quotes every 4 seconds for better readability
+                    if counter % 40 == 0 && lines.len() > 3 {
                         gadget.scroll_quote(lines.len());
                     }
 
                     // Display current lines based on scroll offset
                     let start_idx = gadget.quote_line_offset;
 
-                    // Show first line
+                    // Optimized layout for 128x32 screen with 6x10 font
+                    // Line 1: y=8 (leaves 2px margin from top)
                     if let Some(first_line) = lines.get(start_idx) {
                         if let Err(e) =
-                            Text::new(first_line, Point::new(2, 10), text_style).draw(&mut display)
+                            Text::new(first_line, Point::new(2, 8), text_style).draw(&mut display)
                         {
                             info!("Failed to draw quote line: {:?}", e);
                             continue;
                         }
                     }
 
-                    // Show second line if available
+                    // Line 2: y=18 (10px spacing for 6x10 font)
                     if let Some(second_line) = lines.get(start_idx + 1) {
                         if let Err(e) =
-                            Text::new(second_line, Point::new(2, 20), text_style).draw(&mut display)
+                            Text::new(second_line, Point::new(2, 18), text_style).draw(&mut display)
                         {
                             info!("Failed to draw second quote line: {:?}", e);
                             continue;
                         }
                     }
 
-                    // Show scroll indicator if there are more lines
-                    if lines.len() > 2 {
-                        let indicator = if start_idx + 2 < lines.len() {
+                    // Line 3: y=28 (only if we have space and no instruction needed)
+                    if lines.len() <= 3 {
+                        if let Some(third_line) = lines.get(start_idx + 2) {
+                            if let Err(e) = Text::new(third_line, Point::new(2, 28), text_style)
+                                .draw(&mut display)
+                            {
+                                info!("Failed to draw third quote line: {:?}", e);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Show scroll indicator if there are more than 3 lines
+                    if lines.len() > 3 {
+                        let indicator = if start_idx + 3 < lines.len() {
                             "..."
                         } else {
                             "..."
                         };
                         if let Err(e) =
-                            Text::new(indicator, Point::new(110, 20), text_style).draw(&mut display)
+                            Text::new(indicator, Point::new(110, 28), text_style).draw(&mut display)
                         {
                             info!("Failed to draw scroll indicator: {:?}", e);
                             continue;
                         }
                     }
 
-                    // Only show instruction if we have 1 line or less (to avoid overlap)
-                    if lines.len() <= 1 {
-                        if let Err(e) = Text::new("Press countdown", Point::new(2, 24), text_style)
+                    // Show instruction only if we have 2 lines or less
+                    if lines.len() <= 2 {
+                        if let Err(e) = Text::new("Press countdown", Point::new(2, 28), text_style)
                             .draw(&mut display)
                         {
                             info!("Failed to draw instruction text: {:?}", e);
@@ -368,9 +381,9 @@ fn main() -> ! {
                     continue;
                 }
 
-                // Display "COUNTDOWN" label
+                // Display "COUNTDOWN" label - centered for 128x32 screen
                 if let Err(e) =
-                    Text::new("COUNTDOWN", Point::new(25, 10), text_style).draw(&mut display)
+                    Text::new("COUNTDOWN", Point::new(20, 8), text_style).draw(&mut display)
                 {
                     info!("Failed to draw countdown label: {:?}", e);
                     continue;
