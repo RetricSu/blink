@@ -193,20 +193,12 @@ pub mod util {
             let space_needed = if current_line.is_empty() { 0 } else { 1 };
             if current_line.len() + space_needed + word.len() <= max_chars_per_line {
                 // Add word to current line
-                if !current_line.is_empty() && current_line.push(' ').is_err() {
-                    // If we can't add space, push current line and start new one
-                    if lines.push(current_line.clone()).is_ok() {
-                        current_line = HString::new();
-                        let _ = current_line.push_str(word);
-                    }
-                    continue;
+                if !current_line.is_empty() {
+                    // This is safe because HString capacity (64) > max_chars_per_line (e.g., 20)
+                    let _ = current_line.push(' ');
                 }
-                if current_line.push_str(word).is_err() {
-                    // If we can't add word, push current line and start new one
-                    if lines.push(current_line.clone()).is_ok() {
-                        current_line = HString::from(word);
-                    }
-                }
+                // This is also safe due to the length check on the parent if-statement.
+                let _ = current_line.push_str(word);
             } else {
                 if !current_line.is_empty() && lines.push(current_line.clone()).is_err() {
                     // If we can't add more lines, break
