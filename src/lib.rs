@@ -28,6 +28,7 @@ pub struct SmartGadget {
     pub current_quote_index: usize,
     pub countdown_seconds: u32,
     pub countdown_original: u32,
+    pub quote_line_offset: usize, // For scrolling through long quotes
 }
 
 // 3. Implement a method to handle events
@@ -55,6 +56,7 @@ impl SmartGadget {
             current_quote_index: 0,
             countdown_seconds: 0,
             countdown_original: 0,
+            quote_line_offset: 0,
         }
     }
 
@@ -69,6 +71,7 @@ impl SmartGadget {
             // If we're fetching a quote and it arrives...
             (State::FetchingQuote, Event::QuoteReceived(quote)) => {
                 self.current_quote = Some(quote);
+                self.quote_line_offset = 0; // Reset scroll position for new quote
                 self.state = State::DisplayingQuote;
                 // ACTION: Display the new quote on the screen
             }
@@ -131,5 +134,12 @@ impl SmartGadget {
 
     pub fn tick_countdown(&mut self) {
         self.handle_event(Event::CountdownTick);
+    }
+
+    pub fn scroll_quote(&mut self, total_lines: usize) {
+        // Scroll through quote lines, showing 2 lines at a time
+        if total_lines > 2 {
+            self.quote_line_offset = (self.quote_line_offset + 1) % (total_lines - 1);
+        }
     }
 }
