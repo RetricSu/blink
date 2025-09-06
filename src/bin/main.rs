@@ -34,7 +34,7 @@ fn format_quote_lines(quote: &str) -> HVec<HString<64>, 8> {
             // Truncate very long words to fit 128px width (21 chars max)
             let truncated = if word.len() > 18 { &word[..18] } else { word };
             if !current_line.is_empty() {
-                if let Ok(_) = lines.push(current_line.clone()) {
+                if lines.push(current_line.clone()).is_ok() {
                     current_line = HString::from(truncated);
                 }
             } else {
@@ -47,28 +47,24 @@ fn format_quote_lines(quote: &str) -> HVec<HString<64>, 8> {
         let space_needed = if current_line.is_empty() { 0 } else { 1 };
         if current_line.len() + space_needed + word.len() <= 20 {
             // ~20 chars per line to fit 128px width with 6x10 font
-            if !current_line.is_empty() {
-                if let Err(_) = current_line.push(' ') {
-                    // If we can't add space, push current line and start new one
-                    if let Ok(_) = lines.push(current_line.clone()) {
-                        current_line = HString::new();
-                        let _ = current_line.push_str(word);
-                    }
-                    continue;
+            if !current_line.is_empty() && current_line.push(' ').is_err() {
+                // If we can't add space, push current line and start new one
+                if lines.push(current_line.clone()).is_ok() {
+                    current_line = HString::new();
+                    let _ = current_line.push_str(word);
                 }
+                continue;
             }
-            if let Err(_) = current_line.push_str(word) {
+            if current_line.push_str(word).is_err() {
                 // If we can't add word, push current line and start new one
-                if let Ok(_) = lines.push(current_line.clone()) {
+                if lines.push(current_line.clone()).is_ok() {
                     current_line = HString::from(word);
                 }
             }
         } else {
-            if !current_line.is_empty() {
-                if let Err(_) = lines.push(current_line.clone()) {
-                    // If we can't add more lines, break
-                    break;
-                }
+            if !current_line.is_empty() && lines.push(current_line.clone()).is_err() {
+                // If we can't add more lines, break
+                break;
             }
             current_line = HString::from(word);
         }
@@ -329,11 +325,7 @@ fn main() -> ! {
 
                     // Show scroll indicator if there are more than 3 lines
                     if lines.len() > 3 {
-                        let indicator = if start_idx + 3 < lines.len() {
-                            "..."
-                        } else {
-                            "..."
-                        };
+                        let indicator = "...";
                         if let Err(e) =
                             Text::new(indicator, Point::new(110, 28), text_style).draw(&mut display)
                         {
