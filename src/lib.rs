@@ -4,6 +4,10 @@ use core::fmt::Write;
 use heapless::String as HString;
 use heapless::Vec as HVec;
 
+// Hardware abstraction modules
+pub mod hardware;
+pub mod renderer;
+
 // 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {

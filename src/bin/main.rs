@@ -1,17 +1,12 @@
 #![no_std]
 #![no_main]
 
-use blink::{util, Event, SmartGadget, State};
-use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyle},
-    pixelcolor::BinaryColor,
-    prelude::*,
-    text::Text,
+use blink::{
+    hardware::{Button, DisplayWrapper, Timer},
+    renderer, Event, SmartGadget, State,
 };
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
-use esp_hal::delay::Delay;
-
 use esp_hal::i2c::master::I2c;
 use esp_hal::main;
 use esp_hal::time::RateExtU32;
@@ -20,34 +15,24 @@ use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
 #[main]
 fn main() -> ! {
-    macro_rules! draw_text {
-        ($display:expr, $text:expr, $point:expr, $style:expr, $err_msg:expr) => {
-            if let Err(e) = Text::new($text, $point, $style).draw(&mut $display) {
-                info!(concat!($err_msg, ": {:?}"), e);
-                continue;
-            }
-        };
-    }
-
-    // generator version: 0.2.2
+    // Initialize logging and hardware
     esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // Initialize I2C for display
     let sda = peripherals.GPIO8;
     let scl = peripherals.GPIO9;
-
-    // Create I2C with proper configuration
-    let i2c_config = esp_hal::i2c::master::Config::default().with_frequency(100u32.kHz()); // Try 100 kHz for better compatibility
-
+    let i2c_config = esp_hal::i2c::master::Config::default().with_frequency(100u32.kHz());
     let i2c = I2c::new(peripherals.I2C0, i2c_config)
         .unwrap()
         .with_scl(scl)
         .with_sda(sda);
 
-    info!("Initializing I2C display...");
+    info!("Initializing display...");
 
+    // Initialize display
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
@@ -57,25 +42,36 @@ fn main() -> ! {
         Ok(_) => info!("Display initialized successfully"),
         Err(e) => {
             info!("Failed to initialize display: {:?}", e);
-            // Continue anyway, but log the error
+            // Continue anyway for demo purposes
         }
     }
 
-    let text_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let delay = Delay::new();
+    // Initialize hardware abstractions
+    let mut display_wrapper = DisplayWrapper::new();
+    let mut timer = Timer::new(100); // 100ms tick interval
+    let mut countdown_timer = Timer::new(1000); // 1 second for countdown ticks
+    let mut button = Button::new();
 
     // Initialize the state machine
     let mut gadget = SmartGadget::new();
 
-    // Start with displaying a quote (already initialized in new())
+    // Event loop state
+    let mut counter = 0u32;
 
-    let mut counter = 0;
+    info!("Starting main event loop...");
 
     loop {
+        let current_time_ms = counter * 100; // Simple time tracking
+
+        // === EVENT GENERATION ===
+
+        // Check for button events (placeholder for now)
+        if let Some(event) = button.check_press() {
+            gadget.handle_event(event);
+        }
+
         // Simulate button press every 5 seconds for demo
-        counter += 1;
-        if counter % 50 == 0 {
-            // Every 5 seconds (50 * 100ms)
+        if counter % 50 == 0 && counter > 0 {
             info!("Simulating button press!");
             gadget.handle_event(Event::ButtonPress);
         }
@@ -86,152 +82,48 @@ fn main() -> ! {
             gadget.handle_event(Event::StartCountdown);
         }
 
-        // Tick countdown if we're in countdown mode every 10 iterations (approximately every second)
-        if counter % 10 == 0 && gadget.state == State::DisplayingCountdown {
+        // Generate countdown tick events
+        if gadget.state == State::DisplayingCountdown
+            && countdown_timer.should_tick(current_time_ms)
+        {
             gadget.tick_countdown();
         }
 
-        // Handle state transitions
-        match gadget.state {
-            State::DisplayingQuote => {
-                info!("Displaying quote: {:?}", gadget.current_quote);
-                if let Err(e) = display.clear(BinaryColor::Off) {
-                    info!("Failed to clear display: {:?}", e);
-                    continue;
-                }
+        // === RENDERING ===
 
-                {
-                    // Split quote into lines for display
-                    let lines = util::format_quote_lines(&gadget.current_quote, 20, 8);
-
-                    // Auto-scroll through long quotes every 4 seconds for better readability
-                    if counter % 40 == 0 && lines.len() > 3 {
-                        gadget.scroll_quote(lines.len());
-                    }
-
-                    // Display current lines based on scroll offset
-                    let start_idx = gadget.quote_line_offset;
-
-                    // Optimized layout for 128x32 screen with 6x10 font
-                    let lines_to_display = if lines.len() > 3 { 2 } else { 3 };
-                    for (i, line) in lines
-                        .iter()
-                        .skip(start_idx)
-                        .take(lines_to_display)
-                        .enumerate()
-                    {
-                        // y=8 for first line, then +10 for each subsequent line
-                        let y = 8 + (i as i32 * 10);
-                        draw_text!(
-                            display,
-                            line,
-                            Point::new(2, y),
-                            text_style,
-                            "Failed to draw quote line"
-                        );
-                    }
-
-                    // Show scroll indicator if there are more than 3 lines
-                    if lines.len() > 3 {
-                        let indicator = "...";
-                        draw_text!(
-                            display,
-                            indicator,
-                            Point::new(110, 28),
-                            text_style,
-                            "Failed to draw scroll indicator"
-                        );
-                    }
-
-                    // Show instruction only if we have 2 lines or less
-                    if lines.len() <= 2 {
-                        draw_text!(
-                            display,
-                            "Press for next",
-                            Point::new(2, 28),
-                            text_style,
-                            "Failed to draw instruction text"
-                        );
-                    }
-                }
-
-                // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for quote display");
-                }
-            }
-
-            State::DisplayingCountdown => {
-                info!("Displaying countdown: {}", gadget.countdown_seconds);
-                if let Err(e) = display.clear(BinaryColor::Off) {
-                    info!("Failed to clear display: {:?}", e);
-                    continue;
-                }
-
-                // Display "COUNTDOWN" label - centered for 128x32 screen
-                draw_text!(
-                    display,
-                    "COUNTDOWN",
-                    Point::new(20, 8),
-                    text_style,
-                    "Failed to draw countdown label"
-                );
-
-                // Format and display the countdown time
-                let countdown_string = util::format_time(gadget.countdown_seconds, false);
-                draw_text!(
-                    display,
-                    &countdown_string,
-                    Point::new(35, 22),
-                    text_style,
-                    "Failed to draw countdown time"
-                );
-
-                // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for countdown display");
-                }
-
-                // Check if countdown finished
-                if gadget.countdown_seconds == 0 {
-                    info!("Countdown finished!");
-                    // Could add a beep or notification here
-                }
-            }
+        // Handle auto-scrolling for quotes
+        if gadget.state == State::DisplayingQuote {
+            renderer::handle_auto_scroll(&mut gadget, counter);
         }
 
-        delay.delay_millis(100); // Small delay for button debouncing
-    }
+        // Render current state
+        let render_success =
+            renderer::render(&gadget.state, &gadget, &mut display, &display_wrapper);
 
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/v0.23.1/examples/src/bin
+        if !render_success {
+            info!("Rendering failed, skipping flush");
+            timer.delay_ms(100);
+            counter += 1;
+            continue;
+        }
+
+        // Flush display with retry logic
+        let flush_success = display_wrapper.try_flush(&mut || display.flush());
+
+        if !flush_success {
+            info!("All flush attempts failed");
+        }
+
+        // === TIMING ===
+
+        // Sleep for the tick interval
+        timer.delay_ms(100);
+        counter += 1;
+
+        // Handle countdown completion
+        if gadget.state == State::DisplayingCountdown && gadget.countdown_seconds == 0 {
+            info!("Countdown finished!");
+            // Could add a beep or notification here
+        }
+    }
 }
