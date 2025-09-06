@@ -173,19 +173,25 @@ pub mod util {
                 if !current_line.is_empty() && lines.push(current_line.clone()).is_err() {
                     break; // No more lines available
                 }
-
-                // Truncate the long word to fit, ensuring we slice on a char boundary.
-                let mut end_idx = core::cmp::min(word.len(), max_chars_per_line);
-                while !word.is_char_boundary(end_idx) && end_idx > 0 {
-                    end_idx -= 1;
-                }
-
-                // Place the truncated word on its own line.
-                let s = HString::from(&word[..end_idx]);
-                if lines.push(s).is_err() {
-                    break; // No more lines available
-                }
                 current_line = HString::new();
+
+                // Break the long word into multiple lines instead of truncating
+                let mut remaining_word = word;
+                while !remaining_word.is_empty() {
+                    if lines.len() >= max_lines {
+                        break;
+                    }
+                    let mut end_idx = core::cmp::min(remaining_word.len(), max_chars_per_line);
+                    while !remaining_word.is_char_boundary(end_idx) && end_idx > 0 {
+                        end_idx -= 1;
+                    }
+
+                    let (chunk, rest) = remaining_word.split_at(end_idx);
+                    if lines.push(HString::from(chunk)).is_err() {
+                        break;
+                    }
+                    remaining_word = rest;
+                }
                 continue;
             }
 
@@ -240,27 +246,5 @@ pub mod util {
         let _ = write!(&mut time_str, "{:02}:{:02}", minutes, seconds);
 
         time_str
-    }
-    /// Formats countdown seconds into time format with configurable display
-    ///
-    /// # Arguments
-    /// * `total_seconds` - Total seconds for countdown
-    /// * `show_hours` - Whether to include hours in the format (true: HH:MM:SS, false: MM:SS)
-    pub fn format_countdown(total_seconds: u32, show_hours: bool) -> HString<16> {
-        let hours = total_seconds / 3600;
-        let minutes = (total_seconds % 3600) / 60;
-        let seconds = total_seconds % 60;
-
-        let mut countdown_str = HString::new();
-
-        if show_hours {
-            // Format as HH:MM:SS, ignoring potential errors.
-            let _ = write!(&mut countdown_str, "{:02}:", hours);
-        }
-
-        // Format minutes and seconds
-        let _ = write!(&mut countdown_str, "{:02}:{:02}", minutes, seconds);
-
-        countdown_str
     }
 }

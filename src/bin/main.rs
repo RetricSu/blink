@@ -278,7 +278,7 @@ fn main() -> ! {
                 }
 
                 // Format and display the countdown time
-                let countdown_string = util::format_countdown(gadget.countdown_seconds, false);
+                let countdown_string = util::format_time(gadget.countdown_seconds, false);
                 if let Err(e) =
                     Text::new(&countdown_string, Point::new(35, 22), text_style).draw(&mut display)
                 {
