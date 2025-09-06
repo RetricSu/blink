@@ -139,9 +139,11 @@ impl SmartGadget {
     }
 
     pub fn scroll_quote(&mut self, total_lines: usize) {
-        // Scroll through quote lines, showing 3 lines at a time for 128x32 screen
+        // Scroll through quote lines. When total_lines > 3, we show 2 lines at a time.
         if total_lines > 3 {
-            self.quote_line_offset = (self.quote_line_offset + 1) % (total_lines - 2);
+            // The number of lines displayed is 2. The last start_idx is total_lines - 2.
+            // The number of possible start indices is total_lines - 1.
+            self.quote_line_offset = (self.quote_line_offset + 1) % (total_lines - 1);
         }
     }
 }
@@ -166,21 +168,24 @@ pub mod util {
         let mut current_line = HString::new();
 
         for word in words {
-            // Skip words that are too long to fit on a single line
+            // Handle words that are too long to fit on a single line
             if word.len() > max_chars_per_line {
-                // Truncate very long words to fit the specified width
-                let truncated = if word.len() > max_chars_per_line - 2 {
-                    &word[..max_chars_per_line - 2]
-                } else {
-                    word
-                };
-                if !current_line.is_empty() {
-                    if lines.push(current_line.clone()).is_ok() {
-                        current_line = HString::from(truncated);
-                    }
-                } else {
-                    current_line = HString::from(truncated);
+                if !current_line.is_empty() && lines.push(current_line.clone()).is_err() {
+                    break; // No more lines available
                 }
+
+                // Truncate the long word to fit, ensuring we slice on a char boundary.
+                let mut end_idx = core::cmp::min(word.len(), max_chars_per_line);
+                while !word.is_char_boundary(end_idx) && end_idx > 0 {
+                    end_idx -= 1;
+                }
+
+                // Place the truncated word on its own line.
+                let s = HString::from(&word[..end_idx]);
+                if lines.push(s).is_err() {
+                    break; // No more lines available
+                }
+                current_line = HString::new();
                 continue;
             }
 
@@ -235,26 +240,15 @@ pub mod util {
         let mut time_str = HString::new();
 
         if show_hours {
-            // Format as HH:MM:SS
-            if hours < 10 {
-                time_str.push('0').unwrap();
-            }
-            write!(&mut time_str, "{}:", hours).unwrap();
+            // Format as HH:MM:SS, ignoring potential errors if the string is full.
+            let _ = write!(&mut time_str, "{:02}:", hours);
         }
 
-        if minutes < 10 {
-            time_str.push('0').unwrap();
-        }
-        write!(&mut time_str, "{}:", minutes).unwrap();
-
-        if seconds < 10 {
-            time_str.push('0').unwrap();
-        }
-        write!(&mut time_str, "{}", seconds).unwrap();
+        // Format minutes and seconds
+        let _ = write!(&mut time_str, "{:02}:{:02}", minutes, seconds);
 
         time_str
     }
-
     /// Formats countdown seconds into time format with configurable display
     ///
     /// # Arguments
@@ -268,24 +262,12 @@ pub mod util {
         let mut countdown_str = HString::new();
 
         if show_hours {
-            // Format as HH:MM:SS
-            if hours < 10 {
-                countdown_str.push('0').unwrap();
-            }
-            write!(&mut countdown_str, "{}:", hours).unwrap();
+            // Format as HH:MM:SS, ignoring potential errors.
+            let _ = write!(&mut countdown_str, "{:02}:", hours);
         }
 
-        // Format minutes
-        if minutes < 10 {
-            countdown_str.push('0').unwrap();
-        }
-        write!(&mut countdown_str, "{}:", minutes).unwrap();
-
-        // Format seconds
-        if seconds < 10 {
-            countdown_str.push('0').unwrap();
-        }
-        write!(&mut countdown_str, "{}", seconds).unwrap();
+        // Format minutes and seconds
+        let _ = write!(&mut countdown_str, "{:02}:{:02}", minutes, seconds);
 
         countdown_str
     }
