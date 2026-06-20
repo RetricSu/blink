@@ -1,5 +1,8 @@
 #![cfg_attr(not(test), no_std)]
 
+pub mod http;
+pub mod wifi;
+
 use core::fmt::Write;
 use heapless::String as HString;
 use heapless::Vec as HVec;
