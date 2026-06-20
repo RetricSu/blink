@@ -27,12 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust for Xtensa/RISC-V
-        uses: esp-rs/xtensa-toolchain@v1.5
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
         with:
-          default: true
-          ldproxy: false
-          buildtargets: riscv32imc-unknown-none-elf
+          components: rust-src
+          targets: riscv32imc-unknown-none-elf
 
       - name: Install QEMU with ESP32-C3 support
         run: |
