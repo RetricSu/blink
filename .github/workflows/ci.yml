@@ -35,8 +35,17 @@ jobs:
 
       - name: Install QEMU with ESP32-C3 support
         run: |
-          QEMU_TAG=$(curl -fsSL https://github.com/espressif/qemu/releases/latest | grep -oE '/espressif/qemu/releases/expanded_assets/[^"]+' | sed 's#.*/expanded_assets/##' | head -1)
-          QEMU_ASSET=$(curl -fsSL "https://github.com/espressif/qemu/releases/expanded_assets/${QEMU_TAG}" | grep -oE 'qemu-riscv32-softmmu-[^" ]+x86_64-linux-gnu\.tar\.xz' | head -1)
+          QEMU_RELEASE_JSON=$(curl -fsSL -H "Accept: application/vnd.github+json" https://api.github.com/repos/espressif/qemu/releases/latest || true)
+          QEMU_TAG=$(jq -r '.tag_name // empty' <<< "${QEMU_RELEASE_JSON}")
+          QEMU_ASSET=$(jq -r '.assets[]?.name | select(test("^qemu-riscv32-softmmu-.*x86_64-linux-gnu\\.tar\\.xz$"))' <<< "${QEMU_RELEASE_JSON}" | head -1)
+          if [ -z "${QEMU_TAG}" ] || [ -z "${QEMU_ASSET}" ]; then
+            QEMU_TAG=$(curl -fsSL https://github.com/espressif/qemu/releases/latest | grep -oE '/espressif/qemu/releases/expanded_assets/[^"]+' | sed 's#.*/expanded_assets/##' | head -1)
+            QEMU_ASSET=$(curl -fsSL "https://github.com/espressif/qemu/releases/expanded_assets/${QEMU_TAG}" | grep -oE 'qemu-riscv32-softmmu-[^" ]+x86_64-linux-gnu\.tar\.xz' | head -1)
+          fi
+          if [ -z "${QEMU_TAG}" ] || [ -z "${QEMU_ASSET}" ]; then
+            echo "Failed to resolve QEMU release tag or Linux riscv32 asset."
+            exit 1
+          fi
           curl -fsSL -o "${QEMU_ASSET}" "https://github.com/espressif/qemu/releases/download/${QEMU_TAG}/${QEMU_ASSET}"
           tar xf "${QEMU_ASSET}"
           echo "$PWD/qemu/bin" >> "$GITHUB_PATH"
