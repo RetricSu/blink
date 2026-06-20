@@ -82,7 +82,7 @@ jobs:
             echo "Refusing to extract archive with unsafe paths: ${QEMU_ASSET}"
             exit 1
           fi
-          tar xf "${QEMU_ASSET}" -C . --no-absolute-filenames --no-same-owner --no-same-permissions
+          tar xf "${QEMU_ASSET}" -C . --no-same-owner --no-same-permissions
           echo "$PWD/qemu/bin" >> "$GITHUB_PATH"
           qemu-system-riscv32 --version
 
