@@ -4,6 +4,7 @@
 pub mod http;
 #[cfg(feature = "network")]
 pub mod wifi;
+pub mod price;
 
 use core::fmt::Write;
 use heapless::String as HString;
