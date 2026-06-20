@@ -6,10 +6,17 @@ version = "0.1.0"
 [[bin]]
 name = "blink"
 path = "./src/bin/main.rs"
+test = false
+bench = false
 
 [dependencies]
 critical-section = "1.2.0"
 embedded-graphics = "0.8.1"
+heapless = "0.7"
+log = { version = "0.4.21" }
+ssd1306 = "0.9.0"
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-backtrace = { version = "0.15.0", features = [
   "esp32c3",
   "exception-handler",
@@ -18,9 +25,6 @@ esp-backtrace = { version = "0.15.0", features = [
 ] }
 esp-hal = { version = "0.23.1", features = ["esp32c3", "unstable"] }
 esp-println = { version = "0.13.0", features = ["esp32c3", "log"] }
-heapless = "0.7"
-log = { version = "0.4.21" }
-ssd1306 = "0.9.0"
 
 [profile.dev]
 # Rust debug is too slow.

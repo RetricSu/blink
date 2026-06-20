@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+TARGET="riscv32imc-unknown-none-elf"
+BINARY="target/${TARGET}/release/blink"
+QEMU_BIN="${QEMU_BIN:-qemu-system-riscv32}"
+TIMEOUT="${QEMU_TIMEOUT:-30}"
+
+echo "==> Building firmware for ${TARGET}..."
+cargo build --release --target "${TARGET}"
+
+if [ ! -f "${BINARY}" ]; then
+    echo "Error: binary not found at ${BINARY}"
+    exit 1
+fi
+
+echo "==> Running QEMU smoke test (timeout: ${TIMEOUT}s)..."
+echo "    Serial output will appear below."
+echo "    QEMU will be killed after ${TIMEOUT}s — an exit code of 124 means smoke test passed."
+
+QEMU_LOG=$(mktemp)
+# Disable exit-on-error: timeout returns 124 on success (killed by timeout).
+set +e
+timeout "${TIMEOUT}" "${QEMU_BIN}" \
+    -M esp32c3 \
+    -nographic \
+    -icount 3 \
+    -kernel "${BINARY}" \
+    -global driver=timer.esp32c3.timg,property=wdt_disable,value=true \
+    2>&1 | tee "${QEMU_LOG}"
+QEMU_EXIT=$?
+set -e
+
+# Check for panic or crash indicators in serial output
+if grep -qiE "panicked at|exception|ERROR|abort|trap" "${QEMU_LOG}"; then
+    echo ""
+    echo "==> Smoke test FAILED: firmware panicked or crashed."
+    echo "    Crash indicators found in serial output:"
+    grep -iE "panicked at|exception|ERROR|abort|trap" "${QEMU_LOG}" | head -5
+    rm -f "${QEMU_LOG}"
+    exit 1
+fi
+
+rm -f "${QEMU_LOG}"
+
+if [ $QEMU_EXIT -eq 124 ]; then
+    echo ""
+    echo "==> Smoke test PASSED: firmware ran for ${TIMEOUT}s without crash."
+    exit 0
+else
+    echo ""
+    echo "==> Smoke test FAILED: QEMU exited prematurely with code ${QEMU_EXIT}."
+    exit 1
+fi

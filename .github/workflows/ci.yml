@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host-test:
+    name: Host unit tests (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+      - run: cargo test
+
+  qemu-smoke:
+    name: QEMU smoke test (ESP32-C3)
+    runs-on: ubuntu-latest
+    needs: host-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust for Xtensa/RISC-V
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          ldproxy: false
+          buildtargets: riscv32imc-unknown-none-elf
+
+      - name: Install QEMU with ESP32-C3 support
+        run: |
+          wget -q https://github.com/espressif/qemu/releases/download/esp-develop-9.1.0-20250122/qemu-riscv32-softmmu-esp-develop-9.1.0-20250122-x86_64-linux-gnu.tar.xz
+          tar xf qemu-riscv32-softmmu-*.tar.xz
+          echo "$PWD/qemu/bin" >> "$GITHUB_PATH"
+          qemu-system-riscv32 --version
+
+      - name: Build and smoke test
+        run: |
+          ./qemu-run
