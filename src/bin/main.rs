@@ -90,7 +90,7 @@ fn main() -> ! {
     let mut gadget = SmartGadget::new();
 
     // Start with displaying a quote
-    gadget.state = State::FetchingQuote;
+    gadget.handle_event(Event::ButtonPress);
     gadget.simulate_quote_fetch();
 
     let mut counter = 0;

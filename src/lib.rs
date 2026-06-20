@@ -122,7 +122,16 @@ impl SmartGadget {
     pub fn get_next_quote(&mut self) -> HString<128> {
         let quote = self.quotes[self.current_quote_index];
         self.current_quote_index = (self.current_quote_index + 1) % self.quotes.len();
-        HString::try_from(quote).unwrap()
+        let safe_quote = if quote.len() > 128 {
+            let mut limit = 128;
+            while !quote.is_char_boundary(limit) {
+                limit -= 1;
+            }
+            &quote[..limit]
+        } else {
+            quote
+        };
+        HString::from(safe_quote)
     }
 
     pub fn simulate_quote_fetch(&mut self) {
@@ -153,6 +162,7 @@ impl SmartGadget {
 /// Utility functions for formatting text and time
 pub mod util {
     use super::*;
+    use core::str::FromStr;
 
     /// Formats a quote into displayable lines with configurable parameters
     ///
@@ -192,7 +202,11 @@ pub mod util {
                     }
 
                     let (chunk, rest) = remaining_word.split_at(end_idx);
-                    if lines.push(HString::try_from(chunk).unwrap()).is_err() {
+                    let hstr = match HString::from_str(chunk) {
+                        Ok(hstr) => hstr,
+                        Err(_) => break,
+                    };
+                    if lines.push(hstr).is_err() {
                         break;
                     }
                     remaining_word = rest;
@@ -215,7 +229,11 @@ pub mod util {
                     // If we can't add more lines, break
                     break;
                 }
-                current_line = HString::try_from(word).unwrap();
+                current_line = if let Ok(hstr) = HString::from_str(word) {
+                    hstr
+                } else {
+                    break;
+                };
             }
 
             // Check if we've reached the maximum number of lines
