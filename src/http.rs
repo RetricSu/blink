@@ -296,11 +296,19 @@ mod inner {
 
     /// Parse an IPv4 address from a dotted-decimal string.
     fn parse_ipv4(s: &str) -> Result<Ipv4Address, HttpError> {
-        let parts: HVec<u8, 4> = s.split('.').filter_map(|p| p.parse().ok()).collect();
-        if parts.len() != 4 {
+        let mut octets = [0u8; 4];
+        let mut count = 0;
+        for part in s.split('.') {
+            if count >= 4 {
+                return Err(HttpError::InvalidUrl);
+            }
+            octets[count] = part.parse().map_err(|_| HttpError::InvalidUrl)?;
+            count += 1;
+        }
+        if count != 4 {
             return Err(HttpError::InvalidUrl);
         }
-        Ok(Ipv4Address::new(parts[0], parts[1], parts[2], parts[3]))
+        Ok(Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]))
     }
 
     /// Parse an HTTP/1.1 response from raw bytes.

@@ -16,6 +16,10 @@ heapless = "0.7"
 log = { version = "0.4.21" }
 ssd1306 = "0.9.0"
 
+[features]
+default = []
+network = ["esp-wifi", "smoltcp", "embedded-io"]
+
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-backtrace = { version = "0.15.0", features = [
   "esp32c3",
@@ -25,9 +29,9 @@ esp-backtrace = { version = "0.15.0", features = [
 ] }
 esp-hal = { version = "0.23.1", features = ["esp32c3", "unstable"] }
 esp-println = { version = "0.13.0", features = ["esp32c3", "log"] }
-esp-wifi = { version = "0.13", features = ["esp32c3", "wifi", "smoltcp"] }
-smoltcp = { version = "0.11", default-features = false, features = ["socket-tcp", "proto-ipv4", "medium-ethernet"] }
-embedded-io = "0.6"
+esp-wifi = { version = "0.13", features = ["esp32c3", "wifi", "smoltcp"], optional = true }
+smoltcp = { version = "0.11", default-features = false, features = ["socket-tcp", "proto-ipv4", "medium-ethernet"], optional = true }
+embedded-io = { version = "0.6", optional = true }
 
 [profile.dev]
 # Rust debug is too slow.

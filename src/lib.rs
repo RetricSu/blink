@@ -1,6 +1,8 @@
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(feature = "network")]
 pub mod http;
+#[cfg(feature = "network")]
 pub mod wifi;
 
 use core::fmt::Write;
