@@ -1,5 +1,10 @@
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(feature = "network")]
+pub mod http;
+#[cfg(feature = "network")]
+pub mod wifi;
+
 use core::fmt::Write;
 use heapless::String as HString;
 use heapless::Vec as HVec;
@@ -451,11 +456,8 @@ mod tests {
 
     #[test]
     fn format_quote_wraps_to_multiple_lines() {
-        let lines = util::format_quote_lines(
-            "this is a very long sentence that should wrap",
-            10,
-            8,
-        );
+        let lines =
+            util::format_quote_lines("this is a very long sentence that should wrap", 10, 8);
         assert!(lines.len() > 1);
     }
 
@@ -538,7 +540,8 @@ mod tests {
         assert_eq!(gadget.state, State::FetchingQuote);
 
         // 3. Quote arrives → DisplayingQuote
-        let quote = HString::<128>::from("A journey of a thousand miles begins with a single step.");
+        let quote =
+            HString::<128>::from("A journey of a thousand miles begins with a single step.");
         gadget.handle_event(Event::QuoteReceived(quote));
         assert_eq!(gadget.state, State::DisplayingQuote);
 
