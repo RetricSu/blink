@@ -63,15 +63,43 @@ mod inner {
     static mut TCP_RX_BUF: [u8; 16384] = [0; 16384];
     static mut TCP_TX_BUF: [u8; 4096] = [0; 4096];
 
+    /// Guards exclusive access to the static `TCP_RX_BUF` / `TCP_TX_BUF`
+    /// buffers. Because the buffers are `static mut`, lending them to a
+    /// `tcp::Socket` while another socket already holds them would create
+    /// aliased mutable references — undefined behavior. This lock ensures at
+    /// most one TCP connection is active at a time.
+    static TCP_IN_USE: AtomicBool = AtomicBool::new(false);
+
     /// Returns the current time as a `smoltcp::time::Instant`.
     ///
-    /// Uses the RISC-V `mcycle` CSR. The ESP32-C3 runs at 160 MHz when
-    /// `CpuClock::max()` is selected (as `main.rs` does).
+    /// Uses the RISC-V 64-bit cycle counter. On RV32 the counter is split
+    /// across the `mcycle` (low) and `mcycleh` (high) CSRs; reading only
+    /// `mcycle` would wrap every ~26.8s at 160 MHz and break smoltcp's
+    /// internal timers (TCP retransmits, DHCP lease renewals). The carry
+    /// loop re-reads `mcycleh` before and after `mcycle` and retries if the
+    /// high word changed, handling the race where `mcycle` overflows between
+    /// the two reads. The ESP32-C3 runs at 160 MHz when `CpuClock::max()` is
+    /// selected (as `main.rs` does).
+    #[allow(clippy::unused_assignments, unused_assignments, unused_variables)]
     fn current_instant() -> Instant {
-        let cycles: u32;
+        let lo: u32;
+        let hi: u32;
+        let hi2: u32;
         unsafe {
-            core::arch::asm!("csrr {0}, mcycle", out(reg) cycles);
+            core::arch::asm!(
+                "1: csrr {hi}, mcycleh
+                   csrr {lo}, mcycle
+                   csrr {hi2}, mcycleh
+                   bne {hi}, {hi2}, 1b",
+                hi = out(reg) hi,
+                lo = out(reg) lo,
+                hi2 = out(reg) hi2,
+                options(nostack, preserves_flags),
+            );
         }
+        // `hi2` is read inside the asm by the `bne` but the compiler can't
+        // see that, hence the function-level allow above.
+        let cycles: u64 = ((hi as u64) << 32) | (lo as u64);
         Instant::from_micros((cycles / 160) as i64)
     }
 
@@ -132,8 +160,16 @@ mod inner {
             if buf.is_empty() {
                 return Ok(0);
             }
+            // Bound the blocking read so a silently-dropped connection or a
+            // server that stops sending without closing cannot hang the
+            // firmware forever.
+            let start = current_instant();
+            let timeout = smoltcp::time::Duration::from_millis(10000);
             loop {
                 let now = current_instant();
+                if now - start > timeout {
+                    return Err(TcpIoError);
+                }
                 self.iface.poll(now, self.device, self.sockets);
                 let sock = self.sockets.get_mut::<tcp::Socket>(self.handle);
                 if !sock.may_recv() {
@@ -157,8 +193,15 @@ mod inner {
                 return Ok(0);
             }
             let mut total = 0;
+            // Same rationale as `read`: bound the blocking write so a full
+            // send buffer or a lost connection cannot hang the firmware.
+            let start = current_instant();
+            let timeout = smoltcp::time::Duration::from_millis(10000);
             while total < buf.len() {
                 let now = current_instant();
+                if now - start > timeout {
+                    return Err(TcpIoError);
+                }
                 self.iface.poll(now, self.device, self.sockets);
                 let sock = self.sockets.get_mut::<tcp::Socket>(self.handle);
                 if !sock.may_send() {
@@ -386,9 +429,16 @@ mod inner {
                     .map_err(|_| WifiError::DnsFailed)?
             };
 
-            // Poll until the query completes or times out.
-            for _ in 0..5000 {
+            // Poll until the query completes or times out. A fixed iteration
+            // count would expire in microseconds on a 160 MHz core, far too
+            // short for a real DNS round-trip — use wall-clock time instead.
+            let start = current_instant();
+            let timeout = smoltcp::time::Duration::from_millis(5000);
+            loop {
                 let now = current_instant();
+                if now - start > timeout {
+                    return Err(WifiError::DnsFailed);
+                }
                 self.iface.poll(now, &mut self.device, &mut self.sockets);
 
                 let dns_sock =
@@ -402,7 +452,6 @@ mod inner {
                     Err(_) => return Err(WifiError::DnsFailed),
                 }
             }
-            Err(WifiError::DnsFailed)
         }
 
         /// Open a TCP connection to `addr:port`.
@@ -417,6 +466,13 @@ mod inner {
         ) -> Result<SocketHandle, WifiError> {
             if !self.is_network_ready() {
                 return Err(WifiError::NotReady);
+            }
+
+            // The TCP socket buffers are `static mut`; lending them to more
+            // than one socket at a time would create aliased mutable
+            // references (undefined behavior). Acquire the lock first.
+            if TCP_IN_USE.swap(true, Ordering::SeqCst) {
+                return Err(WifiError::TcpFailed);
             }
 
             let socket = tcp::Socket::new(
@@ -436,30 +492,37 @@ mod inner {
                     addr: None,
                     port: local_port,
                 };
-                sock.connect(&mut cx, remote, local)
-                    .map_err(|_| {
-                        self.sockets.remove(handle);
-                        WifiError::TcpFailed
-                    })?;
+                if sock.connect(&mut cx, remote, local).is_err() {
+                    self.sockets.remove(handle);
+                    TCP_IN_USE.store(false, Ordering::SeqCst);
+                    return Err(WifiError::TcpFailed);
+                }
             }
 
-            // Wait for the TCP handshake to complete.
-            for _ in 0..5000 {
+            // Wait for the TCP handshake to complete. A fixed iteration
+            // count would expire in microseconds on a 160 MHz core, before
+            // a real handshake can finish — use wall-clock time instead.
+            let start = current_instant();
+            let timeout = smoltcp::time::Duration::from_millis(5000);
+            loop {
                 let now = current_instant();
+                if now - start > timeout {
+                    self.sockets.remove(handle);
+                    TCP_IN_USE.store(false, Ordering::SeqCst);
+                    return Err(WifiError::TcpFailed);
+                }
                 self.iface.poll(now, &mut self.device, &mut self.sockets);
                 let sock =
                     self.sockets.get_mut::<tcp::Socket>(handle);
                 if !sock.is_open() {
                     self.sockets.remove(handle);
+                    TCP_IN_USE.store(false, Ordering::SeqCst);
                     return Err(WifiError::TcpFailed);
                 }
                 if sock.may_send() {
                     return Ok(handle);
                 }
             }
-
-            self.sockets.remove(handle);
-            Err(WifiError::TcpFailed)
         }
 
         /// Create an `embedded_io` bridge for a TCP socket.
@@ -478,6 +541,7 @@ mod inner {
         /// Close and remove a TCP socket.
         pub fn tcp_close(&mut self, handle: SocketHandle) {
             self.sockets.remove(handle);
+            TCP_IN_USE.store(false, Ordering::SeqCst);
         }
     }
 }
