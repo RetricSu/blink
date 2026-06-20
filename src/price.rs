@@ -151,7 +151,7 @@ fn skip_json_value(s: &mut &str) -> Option<()> {
     let c = s.as_bytes()[0];
     match c {
         b'"' => {
-            let _ = parse_json_string(s);
+            parse_json_string(s)?;
         }
         b'{' => {
             *s = &s[1..];
@@ -318,6 +318,20 @@ mod tests {
         // The literal "price":" must not match inside the symbol value.
         let body = r#"{"symbol":"PRICEUSDT","price":"123.45"}"#;
         assert_eq!(parse_price_json(body), Some(123.45));
+    }
+
+    #[test]
+    fn parse_unclosed_string_in_non_price_field_returns_none() {
+        // A malformed non-price string value should cause the parser to fail
+        // instead of silently skipping it.
+        let body = r#"{"symbol":"BTCUSDT"#;
+        assert_eq!(parse_price_json(body), None);
+    }
+
+    #[test]
+    fn parse_unclosed_string_as_price_value_returns_none() {
+        let body = r#"{"price":"123.45"#;
+        assert_eq!(parse_price_json(body), None);
     }
 
     #[test]
