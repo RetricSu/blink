@@ -323,8 +323,10 @@ fn main() -> ! {
 
                 flush_display!(display, delay, "price display");
 
-                // Auto-cycle asset every 5 seconds while in price mode
-                if counter % 50 == 0 {
+                // Auto-cycle asset every 5 seconds while in price mode.
+                // Use an offset from the simulated button pulse so both events
+                // never fire in the same loop iteration.
+                if counter % 50 == 25 {
                     info!("Auto-cycling asset");
                     gadget.handle_event(Event::AssetTick);
                 }

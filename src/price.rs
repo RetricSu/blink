@@ -17,6 +17,15 @@ pub enum Asset {
 }
 
 impl Asset {
+    /// Position of this asset in [`ALL_ASSETS`].
+    pub fn index(&self) -> usize {
+        match self {
+            Asset::Btc => 0,
+            Asset::Ckb => 1,
+            Asset::Gold => 2,
+        }
+    }
+
     /// Binance trading symbol used for the price endpoint.
     pub fn binance_symbol(&self) -> &'static str {
         match self {
@@ -44,27 +53,189 @@ pub const ALL_ASSETS: [Asset; 3] = [Asset::Btc, Asset::Ckb, Asset::Gold];
 /// Output looks like `"BTC: 65432.10"` and fits on a single 6x10 line.
 pub fn format_price(asset: Asset, price: f64) -> HString<128> {
     let mut s = HString::new();
-    // Buffer capacity (128) is reserved for the formatted price string;
-    // the asset label is at most 4 bytes and the price is rendered with
-    // two decimal places, so truncation is not expected for typical values.
-    let _ = write!(&mut s, "{}: {:.2}", asset.display_name(), price);
+    // The buffer (128 bytes) is far larger than the formatted output
+    // (max 4-byte label + ": " + two-decimal price), so write cannot fail.
+    write!(&mut s, "{}: {:.2}", asset.display_name(), price).unwrap();
     s
 }
 
 /// Build the Binance `/api/v3/ticker/price` request path for a symbol.
 pub fn binance_price_path(symbol: &str) -> HString<64> {
     let mut s = HString::new();
-    let _ = write!(&mut s, "/api/v3/ticker/price?symbol={}", symbol);
+    // The path is bounded by the fixed prefix and a 20-character symbol.
+    write!(&mut s, "/api/v3/ticker/price?symbol={}", symbol).unwrap();
     s
 }
 
 /// Parse the Binance ticker response body: `{"symbol":"...","price":"..."}`.
+///
+/// This is a small, no_std JSON object walker that looks for the `"price"`
+/// string field. It tolerates whitespace and different field ordering, and
+/// it will not be fooled by the substring `"price":"` appearing inside
+/// another string value.
 pub fn parse_price_json(body: &str) -> Option<f64> {
-    // Minimal JSON parser: find the quoted "price" value.
-    let key = "\"price\":\"";
-    let start = body.find(key)? + key.len();
-    let end = body[start..].find('"')?;
-    body[start..start + end].parse().ok()
+    let mut s = body.trim_start();
+    if !s.starts_with('{') {
+        return None;
+    }
+    s = &s[1..];
+
+    loop {
+        s = s.trim_start();
+        if s.starts_with('}') || s.is_empty() {
+            return None;
+        }
+
+        let key = parse_json_string(&mut s)?;
+        s = s.trim_start();
+        if !s.starts_with(':') {
+            return None;
+        }
+        s = &s[1..];
+        s = s.trim_start();
+
+        if key == "price" {
+            let value = parse_json_string(&mut s)?;
+            return value.parse().ok();
+        }
+
+        skip_json_value(&mut s)?;
+
+        s = s.trim_start();
+        if s.starts_with(',') {
+            s = &s[1..];
+        } else if s.starts_with('}') {
+            return None;
+        } else {
+            return None;
+        }
+    }
+}
+
+/// Parse a JSON string value (without the surrounding quotes) and advance `s`.
+fn parse_json_string<'a>(s: &mut &'a str) -> Option<&'a str> {
+    *s = s.trim_start();
+    if !s.starts_with('"') {
+        return None;
+    }
+
+    let bytes = s.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                i = i.checked_add(2)?;
+                if i > bytes.len() {
+                    return None;
+                }
+            }
+            b'"' => {
+                let value = &s[1..i];
+                *s = &s[i + 1..];
+                return Some(value);
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Skip a single JSON value (string, number, object, array, true, false, null)
+/// and advance `s`.
+fn skip_json_value(s: &mut &str) -> Option<()> {
+    *s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+
+    let c = s.as_bytes()[0];
+    match c {
+        b'"' => {
+            let _ = parse_json_string(s);
+        }
+        b'{' => {
+            *s = &s[1..];
+            loop {
+                *s = s.trim_start();
+                if s.starts_with('}') {
+                    *s = &s[1..];
+                    break;
+                }
+                let _ = parse_json_string(s)?;
+                *s = s.trim_start();
+                if !s.starts_with(':') {
+                    return None;
+                }
+                *s = &s[1..];
+                skip_json_value(s)?;
+                *s = s.trim_start();
+                if s.starts_with(',') {
+                    *s = &s[1..];
+                } else if s.starts_with('}') {
+                    *s = &s[1..];
+                    break;
+                } else {
+                    return None;
+                }
+            }
+        }
+        b'[' => {
+            *s = &s[1..];
+            loop {
+                *s = s.trim_start();
+                if s.starts_with(']') {
+                    *s = &s[1..];
+                    break;
+                }
+                skip_json_value(s)?;
+                *s = s.trim_start();
+                if s.starts_with(',') {
+                    *s = &s[1..];
+                } else if s.starts_with(']') {
+                    *s = &s[1..];
+                    break;
+                } else {
+                    return None;
+                }
+            }
+        }
+        b't' => {
+            if s.starts_with("true") {
+                *s = &s[4..];
+            } else {
+                return None;
+            }
+        }
+        b'f' => {
+            if s.starts_with("false") {
+                *s = &s[5..];
+            } else {
+                return None;
+            }
+        }
+        b'n' => {
+            if s.starts_with("null") {
+                *s = &s[4..];
+            } else {
+                return None;
+            }
+        }
+        _ => {
+            // Number: consume until the next comma, closing brace, or bracket.
+            let mut end = 0;
+            for (idx, ch) in s.char_indices() {
+                if ch == ',' || ch == '}' || ch == ']' {
+                    break;
+                }
+                end = idx + ch.len_utf8();
+            }
+            if end == 0 {
+                return None;
+            }
+            *s = &s[end..];
+        }
+    }
+    Some(())
 }
 
 /// Simulated prices used while the device HTTP client is HTTP-only.
@@ -128,6 +299,32 @@ mod tests {
     #[test]
     fn parse_invalid_response_returns_none() {
         assert_eq!(parse_price_json("not json"), None);
+    }
+
+    #[test]
+    fn parse_reversed_field_order() {
+        let body = r#"{"price":"65432.10","symbol":"BTCUSDT"}"#;
+        assert_eq!(parse_price_json(body), Some(65432.10));
+    }
+
+    #[test]
+    fn parse_tolerates_whitespace() {
+        let body = r#"{ "symbol" : "BTCUSDT", "price" : "65432.10" }"#;
+        assert_eq!(parse_price_json(body), Some(65432.10));
+    }
+
+    #[test]
+    fn parse_ignores_price_substring_in_other_string() {
+        // The literal "price":" must not match inside the symbol value.
+        let body = r#"{"symbol":"PRICEUSDT","price":"123.45"}"#;
+        assert_eq!(parse_price_json(body), Some(123.45));
+    }
+
+    #[test]
+    fn asset_index_matches_all_assets_order() {
+        assert_eq!(Asset::Btc.index(), 0);
+        assert_eq!(Asset::Ckb.index(), 1);
+        assert_eq!(Asset::Gold.index(), 2);
     }
 
     #[test]
