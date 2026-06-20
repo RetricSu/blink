@@ -64,8 +64,8 @@ mod inner {
 
     // ── Internal constants ────────────────────────────────────────
 
-    /// Maximum raw HTTP response we'll buffer before parsing.
-    const RX_CAPACITY: usize = 2048;
+    /// Buffer size for raw HTTP response.
+    const RX_CAPACITY: usize = 1024;
     /// Poll iterations before timing out a connection/request.
     const MAX_POLL_ITER: usize = 2000;
 
@@ -199,12 +199,21 @@ mod inner {
             }
 
             // Wait for the TCP handshake to complete
+            let mut handshake_ok = false;
             for _ in 0..MAX_POLL_ITER {
                 resources.stack.work();
                 let sock = sockets.get::<smoltcp::socket::tcp::Socket>(handle);
-                if sock.may_send() {
+                if !sock.is_open() {
                     break;
                 }
+                if sock.may_send() {
+                    handshake_ok = true;
+                    break;
+                }
+            }
+            if !handshake_ok {
+                sockets.remove(handle);
+                return Err(HttpError::ConnectionFailed);
             }
 
             // ── Send request (headers + optional body) ────────────
@@ -214,7 +223,10 @@ mod inner {
                     continue;
                 }
                 let mut sent = 0usize;
-                while sent < chunk.len() {
+                for _ in 0..MAX_POLL_ITER {
+                    if sent >= chunk.len() {
+                        break;
+                    }
                     resources.stack.work();
                     let mut sock =
                         sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
@@ -228,6 +240,10 @@ mod inner {
                             }
                         }
                     }
+                }
+                if sent < chunk.len() {
+                    sockets.remove(handle);
+                    return Err(HttpError::SendFailed);
                 }
             }
 
@@ -244,6 +260,9 @@ mod inner {
             for _ in 0..MAX_POLL_ITER {
                 resources.stack.work();
                 let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                if !sock.may_recv() {
+                    break;
+                }
                 if sock.can_recv() {
                     let space = &mut rx_buf[rx_total..];
                     match sock.recv_slice(space) {
@@ -257,10 +276,6 @@ mod inner {
                         Err(tcp::RecvError::InvalidState) => continue,
                         Err(_) => break,
                     }
-                }
-                // If socket indicates no more data will come, finish
-                if !sock.may_recv() && rx_total > 0 {
-                    break;
                 }
             }
 
@@ -292,24 +307,37 @@ mod inner {
     ///
     /// Extracts the status code and copies the body into `body_buf`.
     /// Handles both `Content-Length`-delimited and connection-close-terminated bodies.
+    /// Headers are parsed as UTF-8 text; the body is copied as raw bytes so binary
+    /// responses are handled correctly.
     fn parse_http_response(raw: &[u8], body_buf: &mut [u8]) -> Result<HttpResponse, HttpError> {
-        let text = core::str::from_utf8(raw).map_err(|_| HttpError::ParseError)?;
+        // Parse only the status line + headers as text, before the double CRLF.
+        let header_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or(raw.len());
+
+        let header_text =
+            core::str::from_utf8(&raw[..header_end]).map_err(|_| HttpError::ParseError)?;
 
         // ── Status line ───────────────────────────────────────────
-        let status_end = text.find("\r\n").unwrap_or(text.len());
-        let status_line = &text[..status_end];
+        let status_end = header_text.find("\r\n").unwrap_or(header_text.len());
+        let status_line = &header_text[..status_end];
 
         let mut parts = status_line.splitn(3, ' ');
         parts.next(); // skip "HTTP/1.1"
         let code_str = parts.next().ok_or(HttpError::ParseError)?;
         let status_code: u16 = code_str.parse().map_err(|_| HttpError::ParseError)?;
 
-        // ── Find body (after double CRLF) ────────────────────────
-        let body_start = text.find("\r\n\r\n").map(|p| p + 4).unwrap_or(text.len());
-        let body = &text[body_start..];
+        // ── Copy body (after double CRLF) ─────────────────────────
+        let body_start = if header_end < raw.len() {
+            header_end + 4
+        } else {
+            raw.len()
+        };
+        let body = &raw[body_start..];
 
         let copy_len = body.len().min(body_buf.len());
-        body_buf[..copy_len].copy_from_slice(&body.as_bytes()[..copy_len]);
+        body_buf[..copy_len].copy_from_slice(&body[..copy_len]);
 
         Ok(HttpResponse {
             status_code,

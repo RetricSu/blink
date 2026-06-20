@@ -100,10 +100,11 @@ mod inner {
             let socket_set = SocketSet::new(unsafe { &mut SOCKET_STORAGE[..] });
 
             // Clock function: esp-wifi uses this to timestamp packets.
-            // On ESP32-C3 the cycle counter runs at 40 MHz.
+            // The cycle counter runs at the CPU frequency.
+            let cpu_mhz = clocks.cpu_clock.to_Hz() / 1_000_000;
             let now = || -> Instant {
                 let cycles = riscv::register::mcycle::read64();
-                Instant::from_micros((cycles / 40) as i64)
+                Instant::from_micros((cycles / cpu_mhz) as i64)
             };
 
             let stack = WifiStack::new(iface_config, wifi_device, socket_set, now);
