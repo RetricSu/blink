@@ -24,7 +24,29 @@ fn main() -> ! {
         ($display:expr, $text:expr, $point:expr, $style:expr, $err_msg:expr) => {
             if let Err(e) = Text::new($text, $point, $style).draw(&mut $display) {
                 info!(concat!($err_msg, ": {:?}"), e);
-                continue;
+            }
+        };
+    }
+
+    macro_rules! flush_display {
+        ($display:expr, $delay:expr, $context:expr) => {
+            let mut flush_success = false;
+            for attempt in 1..=3 {
+                match $display.flush() {
+                    Ok(_) => {
+                        flush_success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        info!("Failed to flush display on attempt {}: {:?}", attempt, e);
+                        if attempt < 3 {
+                            $delay.delay_millis(10);
+                        }
+                    }
+                }
+            }
+            if !flush_success {
+                info!("All flush attempts failed for {}", $context);
             }
         };
     }
@@ -68,6 +90,7 @@ fn main() -> ! {
     let mut gadget = SmartGadget::new();
 
     // Start with displaying a quote
+    gadget.state = State::FetchingQuote;
     gadget.simulate_quote_fetch();
 
     let mut counter = 0;
@@ -119,24 +142,7 @@ fn main() -> ! {
                 );
 
                 // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for time display");
-                }
+                flush_display!(display, delay, "time display");
             }
 
             State::FetchingQuote => {
@@ -155,24 +161,7 @@ fn main() -> ! {
                 );
 
                 // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for loading display");
-                }
+                flush_display!(display, delay, "loading display");
 
                 // Simulate quote fetching
                 delay.delay_millis(1000);
@@ -242,24 +231,7 @@ fn main() -> ! {
                 }
 
                 // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for quote display");
-                }
+                flush_display!(display, delay, "quote display");
             }
 
             State::DisplayingCountdown => {
@@ -289,28 +261,10 @@ fn main() -> ! {
                 );
 
                 // Flush with retry logic
-                let mut flush_success = false;
-                for attempt in 1..=3 {
-                    match display.flush() {
-                        Ok(_) => {
-                            flush_success = true;
-                            break;
-                        }
-                        Err(e) => {
-                            info!("Failed to flush display on attempt {}: {:?}", attempt, e);
-                            if attempt < 3 {
-                                delay.delay_millis(10);
-                            }
-                        }
-                    }
-                }
-                if !flush_success {
-                    info!("All flush attempts failed for countdown display");
-                }
+                flush_display!(display, delay, "countdown display");
 
                 // Check if countdown finished
                 if gadget.countdown_seconds == 0 {
-                    info!("Countdown finished!");
                     // Could add a beep or notification here
                 }
             }

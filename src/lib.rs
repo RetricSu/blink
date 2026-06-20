@@ -2,6 +2,7 @@
 
 use core::fmt::Write;
 use heapless::String as HString;
+use log::info;
 use heapless::Vec as HVec;
 
 // 1. Define your States and Events as enums
@@ -102,6 +103,7 @@ impl SmartGadget {
 
             // Countdown finished
             (State::DisplayingCountdown, Event::CountdownFinished) => {
+                info!("Countdown finished!");
                 self.state = State::DisplayingTime;
                 // ACTION: Countdown finished, return to time
             }
@@ -120,7 +122,7 @@ impl SmartGadget {
     pub fn get_next_quote(&mut self) -> HString<128> {
         let quote = self.quotes[self.current_quote_index];
         self.current_quote_index = (self.current_quote_index + 1) % self.quotes.len();
-        HString::from(quote)
+        HString::try_from(quote).unwrap()
     }
 
     pub fn simulate_quote_fetch(&mut self) {
@@ -185,9 +187,12 @@ pub mod util {
                     while !remaining_word.is_char_boundary(end_idx) && end_idx > 0 {
                         end_idx -= 1;
                     }
+                    if end_idx == 0 {
+                        end_idx = remaining_word.chars().next().map_or(0, |c| c.len_utf8());
+                    }
 
                     let (chunk, rest) = remaining_word.split_at(end_idx);
-                    if lines.push(HString::from(chunk)).is_err() {
+                    if lines.push(HString::try_from(chunk).unwrap()).is_err() {
                         break;
                     }
                     remaining_word = rest;
@@ -210,7 +215,7 @@ pub mod util {
                     // If we can't add more lines, break
                     break;
                 }
-                current_line = HString::from(word);
+                current_line = HString::try_from(word).unwrap();
             }
 
             // Check if we've reached the maximum number of lines
