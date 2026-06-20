@@ -33,6 +33,11 @@ jobs:
           components: rust-src
           targets: riscv32imc-unknown-none-elf
 
+      - name: Install QEMU runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsdl2-2.0-0
+
       - name: Install QEMU with ESP32-C3 support
         run: |
           QEMU_ASSET_PATTERN='qemu-riscv32-softmmu-[A-Za-z0-9._-]+-x86_64-linux-gnu\.tar\.xz'
