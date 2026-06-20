@@ -1,6 +1,5 @@
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(feature = "network")]
 pub mod http;
 #[cfg(feature = "network")]
 pub mod wifi;
@@ -174,7 +173,7 @@ impl SmartGadget {
         } else {
             quote
         };
-        HString::from(safe_quote)
+        HString::try_from(safe_quote).unwrap()
     }
 
     pub fn simulate_quote_fetch(&mut self) {
@@ -347,7 +346,7 @@ mod tests {
     fn quote_received_while_fetching_goes_to_displaying() {
         let mut gadget = SmartGadget::new();
         gadget.state = State::FetchingQuote;
-        let quote = HString::<128>::from("Hello, world!");
+        let quote = HString::<128>::try_from("Hello, world!").unwrap();
         gadget.handle_event(Event::QuoteReceived(quote.clone()));
         assert_eq!(gadget.state, State::DisplayingQuote);
         assert_eq!(gadget.current_quote, Some(quote));
@@ -412,7 +411,7 @@ mod tests {
         assert_eq!(gadget.state, State::FetchingQuote);
 
         let mut g2 = SmartGadget::new();
-        let q = HString::<128>::from("test");
+        let q = HString::<128>::try_from("test").unwrap();
         g2.handle_event(Event::QuoteReceived(q));
         assert_eq!(g2.state, State::DisplayingTime);
     }
@@ -588,7 +587,7 @@ mod tests {
 
         // 3. Quote arrives → DisplayingQuote
         let quote =
-            HString::<128>::from("A journey of a thousand miles begins with a single step.");
+            HString::<128>::try_from("A journey of a thousand miles begins with a single step.").unwrap();
         gadget.handle_event(Event::QuoteReceived(quote));
         assert_eq!(gadget.state, State::DisplayingQuote);
 
@@ -624,7 +623,7 @@ mod tests {
     fn price_received_while_fetching_goes_to_displaying() {
         let mut gadget = SmartGadget::new();
         gadget.state = State::FetchingPrice;
-        let price = HString::<128>::from("BTC: 65432.10");
+        let price = HString::<128>::try_from("BTC: 65432.10").unwrap();
         gadget.handle_event(Event::PriceReceived(price.clone()));
         assert_eq!(gadget.state, State::DisplayingPrice);
         assert_eq!(gadget.current_price, Some(price));
@@ -652,7 +651,7 @@ mod tests {
     fn asset_tick_cycles_asset_and_fetches() {
         let mut gadget = SmartGadget::new();
         gadget.state = State::DisplayingPrice;
-        gadget.current_price = Some(HString::<128>::from("BTC: 65432.10"));
+        gadget.current_price = Some(HString::<128>::try_from("BTC: 65432.10").unwrap());
         gadget.handle_event(Event::AssetTick);
         assert_eq!(gadget.current_asset, Asset::Ckb);
         assert!(gadget.current_price.is_none());

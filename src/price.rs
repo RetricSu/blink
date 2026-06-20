@@ -256,6 +256,45 @@ pub fn simulate_fetch_price(asset: Asset) -> f64 {
     }
 }
 
+/// Errors that can occur when fetching a real price from Binance.
+#[cfg(all(feature = "network", target_arch = "riscv32"))]
+#[derive(Debug)]
+pub enum FetchError {
+    Http(crate::http::HttpError),
+    BadStatus(u16),
+    ParseError,
+}
+
+/// Fetch the live price of `asset` from the Binance HTTPS API.
+///
+/// Requires a [`NetworkStack`](crate::wifi::NetworkStack) with WiFi connected
+/// and DHCP configured. On error, the caller should fall back to
+/// [`simulate_fetch_price`].
+#[cfg(all(feature = "network", target_arch = "riscv32"))]
+pub fn fetch_price(
+    stack: &mut crate::wifi::NetworkStack<'_>,
+    asset: Asset,
+) -> Result<f64, FetchError> {
+    use crate::http::HttpClient;
+
+    let path = binance_price_path(asset.binance_symbol());
+    let mut client = HttpClient::new();
+    let mut body_buf = [0u8; 256];
+
+    let resp = client
+        .get_https(stack, "api.binance.com", &path, &mut body_buf)
+        .map_err(FetchError::Http)?;
+
+    if resp.status_code != 200 {
+        return Err(FetchError::BadStatus(resp.status_code));
+    }
+
+    let body = core::str::from_utf8(&body_buf[..resp.body_len])
+        .map_err(|_| FetchError::ParseError)?;
+
+    parse_price_json(body).ok_or(FetchError::ParseError)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
