@@ -4,11 +4,13 @@
 pub mod http;
 #[cfg(feature = "network")]
 pub mod wifi;
+pub mod price;
 
 use core::fmt::Write;
 use heapless::String as HString;
 use heapless::Vec as HVec;
 use log::info;
+use price::{Asset, ALL_ASSETS, format_price, simulate_fetch_price};
 
 // 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +19,8 @@ pub enum State {
     DisplayingQuote,
     FetchingQuote,
     DisplayingCountdown,
+    FetchingPrice,
+    DisplayingPrice,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +30,9 @@ pub enum Event {
     FetchFailed,
     CountdownTick,
     CountdownFinished,
+    PriceReceived(HString<128>),
+    PriceFetchFailed,
+    AssetTick,
 }
 
 // 2. Create a struct for your gadget
@@ -37,6 +44,8 @@ pub struct SmartGadget {
     pub countdown_seconds: u32,
     pub countdown_original: u32,
     pub quote_line_offset: usize, // For scrolling through long quotes
+    pub current_asset: Asset,
+    pub current_price: Option<HString<128>>,
 }
 
 // 3. Implement a method to handle events
@@ -65,6 +74,8 @@ impl SmartGadget {
             countdown_seconds: 0,
             countdown_original: 0,
             quote_line_offset: 0,
+            current_asset: Asset::Btc,
+            current_price: None,
         }
     }
 
@@ -84,17 +95,44 @@ impl SmartGadget {
                 // ACTION: Display the new quote on the screen
             }
 
-            // If we're showing a quote and the button is pressed...
+            // If we're showing a quote and the button is pressed, switch to price mode...
             (State::DisplayingQuote, Event::ButtonPress) => {
+                self.state = State::FetchingPrice;
+                // ACTION: Start fetching price
+            }
+
+            // If we're in countdown and button is pressed, cancel back to time mode...
+            (State::DisplayingCountdown, Event::ButtonPress) => {
+                self.state = State::DisplayingTime;
+                // ACTION: Go back to time mode
+            }
+
+            // If we're fetching a price and it arrives...
+            (State::FetchingPrice, Event::PriceReceived(price)) => {
+                self.current_price = Some(price);
+                self.state = State::DisplayingPrice;
+                // ACTION: Display the price on the screen
+            }
+
+            // If we're fetching a price and it fails...
+            (State::FetchingPrice, Event::PriceFetchFailed) => {
+                self.state = State::DisplayingTime;
+                // ACTION: Show error, then switch to time
+            }
+
+            // If we're showing price and the button is pressed, start the countdown...
+            (State::DisplayingPrice, Event::ButtonPress) => {
                 self.start_countdown(30); // Start 30-second countdown
                 self.state = State::DisplayingCountdown;
                 // ACTION: Switch to countdown mode
             }
 
-            // If we're in countdown and button is pressed...
-            (State::DisplayingCountdown, Event::ButtonPress) => {
-                self.state = State::DisplayingTime;
-                // ACTION: Go back to time mode
+            // Cycle to the next asset while displaying price
+            (State::DisplayingPrice, Event::AssetTick) => {
+                self.cycle_asset();
+                self.current_price = None; // Clear stale price before fetching the next asset
+                self.state = State::FetchingPrice;
+                // ACTION: Fetch next asset price
             }
 
             // Countdown tick event
@@ -161,6 +199,17 @@ impl SmartGadget {
             // The number of possible start indices is total_lines - 1.
             self.quote_line_offset = (self.quote_line_offset + 1) % (total_lines - 1);
         }
+    }
+
+    pub(crate) fn cycle_asset(&mut self) {
+        let next_index = (self.current_asset.index() + 1) % ALL_ASSETS.len();
+        self.current_asset = ALL_ASSETS[next_index];
+    }
+
+    pub fn simulate_price_fetch(&mut self) {
+        let price = simulate_fetch_price(self.current_asset);
+        let formatted = format_price(self.current_asset, price);
+        self.handle_event(Event::PriceReceived(formatted));
     }
 }
 
@@ -306,13 +355,11 @@ mod tests {
     }
 
     #[test]
-    fn button_press_from_quote_starts_countdown() {
+    fn button_press_from_quote_goes_to_fetching_price() {
         let mut gadget = SmartGadget::new();
         gadget.state = State::DisplayingQuote;
         gadget.handle_event(Event::ButtonPress);
-        assert_eq!(gadget.state, State::DisplayingCountdown);
-        assert_eq!(gadget.countdown_seconds, 30);
-        assert_eq!(gadget.countdown_original, 30);
+        assert_eq!(gadget.state, State::FetchingPrice);
     }
 
     #[test]
@@ -545,12 +592,21 @@ mod tests {
         gadget.handle_event(Event::QuoteReceived(quote));
         assert_eq!(gadget.state, State::DisplayingQuote);
 
-        // 4. Press button → DisplayingCountdown (30s)
+        // 4. Press button → FetchingPrice
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::FetchingPrice);
+
+        // 5. Price arrives → DisplayingPrice
+        gadget.simulate_price_fetch();
+        assert_eq!(gadget.state, State::DisplayingPrice);
+        assert!(gadget.current_price.is_some());
+
+        // 6. Press button → DisplayingCountdown (30s)
         gadget.handle_event(Event::ButtonPress);
         assert_eq!(gadget.state, State::DisplayingCountdown);
         assert_eq!(gadget.countdown_seconds, 30);
 
-        // 5. Countdown ticks down to zero
+        // 7. Countdown ticks down to zero
         for _ in 0..29 {
             gadget.tick_countdown();
         }
@@ -560,5 +616,63 @@ mod tests {
         assert_eq!(gadget.state, State::DisplayingCountdown);
         gadget.tick_countdown();
         assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    // ── price display transitions ─────────────────────────────────
+
+    #[test]
+    fn price_received_while_fetching_goes_to_displaying() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::FetchingPrice;
+        let price = HString::<128>::from("BTC: 65432.10");
+        gadget.handle_event(Event::PriceReceived(price.clone()));
+        assert_eq!(gadget.state, State::DisplayingPrice);
+        assert_eq!(gadget.current_price, Some(price));
+    }
+
+    #[test]
+    fn price_fetch_failed_goes_back_to_time() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::FetchingPrice;
+        gadget.handle_event(Event::PriceFetchFailed);
+        assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn button_press_from_price_goes_to_countdown() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingPrice;
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::DisplayingCountdown);
+        assert_eq!(gadget.countdown_seconds, 30);
+        assert_eq!(gadget.countdown_original, 30);
+    }
+
+    #[test]
+    fn asset_tick_cycles_asset_and_fetches() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingPrice;
+        gadget.current_price = Some(HString::<128>::from("BTC: 65432.10"));
+        gadget.handle_event(Event::AssetTick);
+        assert_eq!(gadget.current_asset, Asset::Ckb);
+        assert!(gadget.current_price.is_none());
+        assert_eq!(gadget.state, State::FetchingPrice);
+    }
+
+    #[test]
+    fn cycle_asset_wraps_around() {
+        let mut gadget = SmartGadget::new();
+        gadget.current_asset = Asset::Gold;
+        gadget.cycle_asset();
+        assert_eq!(gadget.current_asset, Asset::Btc);
+    }
+
+    #[test]
+    fn simulate_price_fetch_transitions_to_displaying() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::FetchingPrice;
+        gadget.simulate_price_fetch();
+        assert_eq!(gadget.state, State::DisplayingPrice);
+        assert!(gadget.current_price.is_some());
     }
 }

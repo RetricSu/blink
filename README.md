@@ -83,6 +83,7 @@ espflash flash --monitor target/riscv32imc-unknown-none-elf/release/blink
 1. **Time Mode**: Shows current time in HH:MM format
 2. **Quote Mode**: Displays inspirational quotes with scrolling text
 3. **Timer Mode**: Shows countdown timer with progress bar
+4. **Price Mode**: Cycles through BTC, CKB, and Gold prices (basic version uses simulated prices)
 
 ## Project Structure
 

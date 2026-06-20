@@ -268,6 +268,69 @@ fn main() -> ! {
                     // Could add a beep or notification here
                 }
             }
+
+            State::FetchingPrice => {
+                info!("Fetching price for {:?}", gadget.current_asset);
+                if let Err(e) = display.clear(BinaryColor::Off) {
+                    info!("Failed to clear display: {:?}", e);
+                    continue;
+                }
+
+                draw_text!(
+                    display,
+                    "Loading price...",
+                    Point::new(10, 16),
+                    text_style,
+                    "Failed to draw text"
+                );
+
+                flush_display!(display, delay, "price loading display");
+
+                // Basic version uses simulation because the HTTP client is HTTP-only
+                // and Binance requires HTTPS/TLS.
+                delay.delay_millis(800);
+                gadget.simulate_price_fetch();
+            }
+
+            State::DisplayingPrice => {
+                info!("Displaying price: {:?}", gadget.current_price);
+                if let Err(e) = display.clear(BinaryColor::Off) {
+                    info!("Failed to clear display: {:?}", e);
+                    continue;
+                }
+
+                // Asset label at the top
+                draw_text!(
+                    display,
+                    gadget.current_asset.display_name(),
+                    Point::new(50, 8),
+                    text_style,
+                    "Failed to draw asset label"
+                );
+
+                // Price or fallback text
+                let price_text: &str = gadget
+                    .current_price
+                    .as_deref()
+                    .unwrap_or("--");
+                draw_text!(
+                    display,
+                    &price_text,
+                    Point::new(10, 24),
+                    text_style,
+                    "Failed to draw price"
+                );
+
+                flush_display!(display, delay, "price display");
+
+                // Auto-cycle asset every 5 seconds while in price mode.
+                // Use an offset from the simulated button pulse so both events
+                // never fire in the same loop iteration.
+                if counter % 50 == 25 {
+                    info!("Auto-cycling asset");
+                    gadget.handle_event(Event::AssetTick);
+                }
+            }
         }
 
         delay.delay_millis(100); // Small delay for button debouncing
