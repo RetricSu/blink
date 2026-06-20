@@ -27,19 +27,90 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust for Xtensa/RISC-V
-        uses: esp-rs/xtensa-toolchain@v1.5
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
         with:
-          default: true
-          ldproxy: false
-          buildtargets: riscv32imc-unknown-none-elf
+          components: rust-src
+          targets: riscv32imc-unknown-none-elf
+
+      - name: Install QEMU runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsdl2-2.0-0
 
       - name: Install QEMU with ESP32-C3 support
         run: |
-          wget -q https://github.com/espressif/qemu/releases/download/esp-develop-9.1.0-20250122/qemu-riscv32-softmmu-esp-develop-9.1.0-20250122-x86_64-linux-gnu.tar.xz
-          tar xf qemu-riscv32-softmmu-*.tar.xz
+          QEMU_ASSET_PATTERN='qemu-riscv32-softmmu-esp(_develop_[0-9]+(\.[0-9]+){2}_[0-9]{8}|-develop-[0-9]+(\.[0-9]+){2}-[0-9]{8})-x86_64-linux-gnu\.tar\.xz'
+          CURL_OPTS=(--connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2)
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "Missing required tool: jq"
+            exit 1
+          fi
+          QEMU_RELEASE_JSON=""
+          if ! QEMU_RELEASE_JSON=$(curl -fsSL "${CURL_OPTS[@]}" -H "Accept: application/vnd.github+json" https://api.github.com/repos/espressif/qemu/releases/latest); then
+            echo "GitHub API release lookup failed; falling back to release page parsing."
+          fi
+          if [ -n "${QEMU_RELEASE_JSON}" ]; then
+            QEMU_TAG=$(jq -r '.tag_name // empty' <<< "${QEMU_RELEASE_JSON}")
+            QEMU_ASSET=$(jq -r --arg pattern "${QEMU_ASSET_PATTERN}" '.assets[].name | select(test($pattern))' <<< "${QEMU_RELEASE_JSON}" | head -1)
+            if [ -z "${QEMU_TAG}" ]; then
+              echo "GitHub API response missing release tag; falling back to release page parsing."
+            fi
+            if [ -z "${QEMU_ASSET}" ]; then
+              echo "GitHub API response missing matching Linux riscv32 asset; falling back to release page parsing."
+            fi
+          fi
+          if [ -z "${QEMU_TAG}" ] || [ -z "${QEMU_ASSET}" ]; then
+            # Fallback parser depends on current GitHub releases HTML containing expanded_assets links.
+            QEMU_RELEASES_HTML=$(curl -fsSL "${CURL_OPTS[@]}" https://github.com/espressif/qemu/releases/latest)
+            QEMU_TAG=$(grep -oE '/espressif/qemu/releases/expanded_assets/[^"]+' <<< "${QEMU_RELEASES_HTML}" | sed 's#.*/expanded_assets/##' | head -1)
+            QEMU_ASSET=$(grep -oE "${QEMU_ASSET_PATTERN}" <<< "${QEMU_RELEASES_HTML}" | head -1)
+            if [ -z "${QEMU_ASSET}" ] && [ -n "${QEMU_TAG}" ]; then
+              QEMU_ASSET=$(curl -fsSL "${CURL_OPTS[@]}" "https://github.com/espressif/qemu/releases/expanded_assets/${QEMU_TAG}" | grep -oE "${QEMU_ASSET_PATTERN}" | head -1)
+            fi
+          fi
+          if [ -z "${QEMU_TAG}" ] || [ -z "${QEMU_ASSET}" ]; then
+            echo "Failed to resolve QEMU release tag or Linux riscv32 asset."
+            exit 1
+          fi
+          if ! grep -Eq "^${QEMU_ASSET_PATTERN}$" <<< "${QEMU_ASSET}"; then
+            echo "Resolved QEMU asset name failed safety check: ${QEMU_ASSET}"
+            exit 1
+          fi
+          echo "Using QEMU release ${QEMU_TAG}, asset ${QEMU_ASSET}"
+          QEMU_DOWNLOAD_URL="https://github.com/espressif/qemu/releases/download/${QEMU_TAG}/${QEMU_ASSET}"
+          if ! curl -fsSL "${CURL_OPTS[@]}" -o "${QEMU_ASSET}" "${QEMU_DOWNLOAD_URL}"; then
+            echo "Failed to download QEMU archive: ${QEMU_DOWNLOAD_URL}"
+            exit 1
+          fi
+          if tar -tf "${QEMU_ASSET}" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+            echo "Refusing to extract archive with unsafe paths: ${QEMU_ASSET}"
+            exit 1
+          fi
+          # In tar verbose listings, l marks symbolic links and h marks hard links.
+          if tar -tvf "${QEMU_ASSET}" | grep -Eq '^[lh]'; then
+            echo "Refusing to extract archive with link entries: ${QEMU_ASSET}"
+            exit 1
+          fi
+          QEMU_TEMP_BASE="${RUNNER_TEMP:-/tmp}"
+          QEMU_TEMP_BASE="${QEMU_TEMP_BASE%/}"
+          QEMU_EXTRACT_PARENT=$(mktemp -d "${QEMU_TEMP_BASE}/qemu-extract.XXXXXX")
+          QEMU_EXTRACT_DIR="${QEMU_EXTRACT_PARENT}/root"
+          mkdir "${QEMU_EXTRACT_DIR}"
+          cleanup_qemu_extract_dir() {
+            case "${QEMU_EXTRACT_PARENT:-}" in
+              "${QEMU_TEMP_BASE}/qemu-extract."*) rm -rf "${QEMU_EXTRACT_PARENT}" ;;
+            esac
+          }
+          trap cleanup_qemu_extract_dir EXIT
+          tar xf "${QEMU_ASSET}" -C "${QEMU_EXTRACT_DIR}" --no-same-owner --no-same-permissions
+          if [ ! -x "${QEMU_EXTRACT_DIR}/qemu/bin/qemu-system-riscv32" ]; then
+            echo "Extracted QEMU archive missing qemu/bin/qemu-system-riscv32"
+            exit 1
+          fi
+          mv "${QEMU_EXTRACT_DIR}/qemu" ./qemu
           echo "$PWD/qemu/bin" >> "$GITHUB_PATH"
-          qemu-system-riscv32 --version
+          "$PWD/qemu/bin/qemu-system-riscv32" --version
 
       - name: Build and smoke test
         run: |
