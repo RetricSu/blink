@@ -5,6 +5,12 @@
 //!
 //! Supports GET and POST with configurable buffer sizes.
 //!
+//! # Security Warning
+//!
+//! This client uses unencrypted HTTP over plain TCP. Do not transmit
+//! passwords, tokens, or personal data through it. It is intended only for
+//! local, trusted networks.
+//!
 //! # Limitations
 //!
 //! - **IP addresses only** (no DNS resolution). Use the server's IPv4 address.
@@ -28,8 +34,7 @@ mod inner {
 
     use esp_wifi::wifi_interface::WifiStack;
     use heapless::String as HString;
-    use heapless::Vec as HVec;
-    use smoltcp::socket::tcp::{self, Socket as _};
+    use smoltcp::socket::tcp;
     use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
     use crate::wifi::WifiResources;
@@ -45,8 +50,6 @@ mod inner {
         RecvFailed,
         /// The HTTP response could not be parsed.
         ParseError,
-        /// DNS hostnames are not supported — use an IPv4 address.
-        DnsNotSupported,
         /// The URL or host string was malformed.
         InvalidUrl,
         /// The response body is larger than the caller's buffer.
@@ -151,6 +154,10 @@ mod inner {
             body: &[u8],
             resp_body: &mut [u8],
         ) -> Result<HttpResponse, HttpError> {
+            // Reject control characters in request tokens to prevent header injection.
+            validate_http_token(host)?;
+            validate_http_token(path)?;
+            validate_http_token(method)?;
             // ── Build HTTP request ────────────────────────────────
             let mut req: HString<1024> = HString::new();
 
@@ -191,11 +198,10 @@ mod inner {
             {
                 let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
                 let mut cx = resources.stack.interface().context();
-                sock.connect(&mut cx, endpoint, |_, _| {})
-                    .map_err(|_| {
-                        sockets.remove(handle);
-                        HttpError::ConnectionFailed
-                    })?;
+                sock.connect(&mut cx, endpoint, |_, _| {}).map_err(|_| {
+                    sockets.remove(handle);
+                    HttpError::ConnectionFailed
+                })?;
             }
 
             // Wait for the TCP handshake to complete
@@ -228,8 +234,7 @@ mod inner {
                         break;
                     }
                     resources.stack.work();
-                    let mut sock =
-                        sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                    let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
                     if sock.can_send() {
                         match sock.send_slice(&chunk[sent..]) {
                             Ok(n) => sent += n,
@@ -256,20 +261,26 @@ mod inner {
             // ── Receive response ──────────────────────────────────
             let mut rx_buf: [u8; RX_CAPACITY] = [0u8; RX_CAPACITY];
             let mut rx_total = 0usize;
+            let mut recv_complete = false;
 
             for _ in 0..MAX_POLL_ITER {
                 resources.stack.work();
                 let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
                 if !sock.may_recv() {
+                    recv_complete = true;
                     break;
                 }
                 if sock.can_recv() {
                     let space = &mut rx_buf[rx_total..];
                     match sock.recv_slice(space) {
-                        Ok(0) => break, // peer closed
+                        Ok(0) => {
+                            recv_complete = true;
+                            break; // peer closed
+                        }
                         Ok(n) => {
                             rx_total += n;
                             if rx_total >= rx_buf.len() {
+                                recv_complete = true;
                                 break;
                             }
                         }
@@ -280,6 +291,10 @@ mod inner {
             }
 
             sockets.remove(handle);
+
+            if !recv_complete {
+                return Err(HttpError::RecvFailed);
+            }
 
             // ── Parse HTTP response ───────────────────────────────
             parse_http_response(&rx_buf[..rx_total], resp_body)
@@ -297,26 +312,35 @@ mod inner {
     /// Parse an IPv4 address from a dotted-decimal string.
     fn parse_ipv4(s: &str) -> Result<Ipv4Address, HttpError> {
         let mut octets = [0u8; 4];
-        let mut count = 0;
-        for part in s.split('.') {
-            if count >= 4 {
+        let mut iter = s.split('.');
+        for i in 0..4 {
+            let part = iter.next().ok_or(HttpError::InvalidUrl)?;
+            if part.is_empty() || part.len() > 3 {
                 return Err(HttpError::InvalidUrl);
             }
-            octets[count] = part.parse().map_err(|_| HttpError::InvalidUrl)?;
-            count += 1;
+            let value: u8 = part.parse().map_err(|_| HttpError::InvalidUrl)?;
+            octets[i] = value;
         }
-        if count != 4 {
+        if iter.next().is_some() {
             return Err(HttpError::InvalidUrl);
         }
         Ok(Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]))
     }
 
+    /// Reject HTTP request tokens that contain control characters which could
+    /// break the request line or headers (`\r`, `\n`, `\0`).
+    fn validate_http_token(s: &str) -> Result<(), HttpError> {
+        if s.bytes().any(|b| b == b'\r' || b == b'\n' || b == b'\0') {
+            return Err(HttpError::InvalidUrl);
+        }
+        Ok(())
+    }
+
     /// Parse an HTTP/1.1 response from raw bytes.
     ///
-    /// Extracts the status code and copies the body into `body_buf`.
-    /// Handles both `Content-Length`-delimited and connection-close-terminated bodies.
-    /// Headers are parsed as UTF-8 text; the body is copied as raw bytes so binary
-    /// responses are handled correctly.
+    /// Extracts the status code and copies everything after the headers into
+    /// `body_buf`. The implementation does not interpret `Content-Length`; it
+    /// treats all bytes following the header block as the response body.
     fn parse_http_response(raw: &[u8], body_buf: &mut [u8]) -> Result<HttpResponse, HttpError> {
         // Parse only the status line + headers as text, before the double CRLF.
         let header_end = raw
@@ -332,7 +356,10 @@ mod inner {
         let status_line = &header_text[..status_end];
 
         let mut parts = status_line.splitn(3, ' ');
-        parts.next(); // skip "HTTP/1.1"
+        let version = parts.next().ok_or(HttpError::ParseError)?;
+        if version != "HTTP/1.1" {
+            return Err(HttpError::ParseError);
+        }
         let code_str = parts.next().ok_or(HttpError::ParseError)?;
         let status_code: u16 = code_str.parse().map_err(|_| HttpError::ParseError)?;
 
@@ -369,7 +396,6 @@ mod inner {
         SendFailed,
         RecvFailed,
         ParseError,
-        DnsNotSupported,
         InvalidUrl,
         BodyTooLarge,
     }
@@ -390,7 +416,7 @@ mod inner {
 
         pub fn get(
             &mut self,
-            _resources: &mut WifiResources,
+            _resources: &mut WifiResources<'_>,
             _host: &str,
             _port: u16,
             _path: &str,
@@ -401,7 +427,7 @@ mod inner {
 
         pub fn post(
             &mut self,
-            _resources: &mut WifiResources,
+            _resources: &mut WifiResources<'_>,
             _host: &str,
             _port: u16,
             _path: &str,
@@ -426,6 +452,8 @@ pub use inner::*;
 
 #[cfg(test)]
 mod tests {
+    #![allow(unused_imports)]
+
     use super::*;
 
     // These tests exercise the parsers — they run on the host as well.

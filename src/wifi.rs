@@ -23,6 +23,8 @@
 
 #[cfg(target_arch = "riscv32")]
 mod inner {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
     use esp_hal::clock::Clocks;
     use esp_hal::rng::Rng;
     use esp_hal::timer::timg::TimerGroup;
@@ -74,20 +76,34 @@ mod inner {
             peripherals: esp_hal::peripherals::Peripherals,
             clocks: &Clocks<'_>,
         ) -> Result<Self, WifiError> {
+            // The socket set lives in a static mut buffer. Creating a second
+            // `WifiManager` would produce a second `&mut` to that buffer,
+            // which is undefined behavior. Guard against double initialization.
+            static INITED: AtomicBool = AtomicBool::new(false);
+            if INITED.swap(true, Ordering::SeqCst) {
+                return Err(WifiError::InitFailed);
+            }
+
             // ── esp-wifi initialization ──────────────────────────
             let timg0 = TimerGroup::new(peripherals.TIMG0, clocks);
             let rng = Rng::new(peripherals.RNG);
             let radio_clk = peripherals.RADIO_CLK;
 
             let init = initialize(EspWifiInitFor::Wifi, timg0.timer0, rng, radio_clk, clocks)
-                .map_err(|_| WifiError::InitFailed)?;
+                .map_err(|_| {
+                    INITED.store(false, Ordering::SeqCst);
+                    WifiError::InitFailed
+                })?;
 
             // The RADIO peripheral is split into WiFi and BLE halves.
             // We only need the WiFi half.
             let (wifi_antenna, _ble) = peripherals.RADIO.split();
 
             let (wifi_device, controller) = esp_wifi::wifi::new_with_mode(init, wifi_antenna)
-                .map_err(|_| WifiError::InitFailed)?;
+                .map_err(|_| {
+                    INITED.store(false, Ordering::SeqCst);
+                    WifiError::InitFailed
+                })?;
 
             // ── smoltcp network stack ────────────────────────────
             let iface_config =
@@ -126,9 +142,7 @@ mod inner {
             }
 
             let mut ssid_h: HString<32> = HString::new();
-            ssid_h
-                .push_str(ssid)
-                .map_err(|_| WifiError::ConfigError)?;
+            ssid_h.push_str(ssid).map_err(|_| WifiError::ConfigError)?;
 
             let mut pwd_h: HString<64> = HString::new();
             pwd_h
@@ -162,20 +176,18 @@ mod inner {
             self.controller
                 .disconnect()
                 .map_err(|_| WifiError::Disconnected)?;
+            // Mark disconnected as soon as the controller reports it; if stop()
+            // fails afterwards we still reflect the disconnected state.
+            self.connected = false;
             self.controller
                 .stop()
                 .map_err(|_| WifiError::Disconnected)?;
-            self.connected = false;
             Ok(())
         }
 
         /// Returns `true` when the WiFi link is up.
         pub fn is_connected(&self) -> bool {
-            self.connected
-                && self
-                    .controller
-                    .is_connected()
-                    .unwrap_or(false)
+            self.connected && self.controller.is_connected().unwrap_or(false)
         }
 
         /// Get mutable access to WiFi resources (network stack, etc.).
@@ -200,6 +212,8 @@ pub use inner::*;
 
 #[cfg(not(target_arch = "riscv32"))]
 mod inner {
+    use core::marker::PhantomData;
+
     #[derive(Debug, Clone, PartialEq)]
     pub enum WifiError {
         InitFailed,
@@ -209,15 +223,37 @@ mod inner {
     }
 
     /// Stub WiFi resources struct for host-side compilation.
-    pub struct WifiResources;
+    pub struct WifiResources<'d> {
+        _phantom: PhantomData<&'d ()>,
+    }
 
     /// Stub WiFi manager for host-side compilation.
-    pub struct WifiManager;
+    pub struct WifiManager<'d> {
+        resources: WifiResources<'d>,
+    }
 
-    impl WifiManager {
+    impl<'d> WifiManager<'d> {
+        pub fn init(_peripherals: (), _clocks: &()) -> Result<Self, WifiError> {
+            Err(WifiError::InitFailed)
+        }
+
+        pub fn connect(&mut self, _ssid: &str, _password: &str) -> Result<(), WifiError> {
+            Err(WifiError::ConnectionFailed)
+        }
+
+        pub fn disconnect(&mut self) -> Result<(), WifiError> {
+            Err(WifiError::Disconnected)
+        }
+
         pub fn is_connected(&self) -> bool {
             false
         }
+
+        pub fn resources(&mut self) -> &mut WifiResources<'d> {
+            &mut self.resources
+        }
+
+        pub fn poll(&mut self) {}
     }
 }
 
