@@ -40,7 +40,7 @@ jobs:
 
       - name: Install QEMU with ESP32-C3 support
         run: |
-          QEMU_ASSET_PATTERN='qemu-riscv32-softmmu-[A-Za-z0-9._-]+-x86_64-linux-gnu\.tar\.xz'
+          QEMU_ASSET_PATTERN='qemu-riscv32-softmmu-esp_develop_[0-9]+(\.[0-9]+){2}_[0-9]{8}-x86_64-linux-gnu\.tar\.xz'
           CURL_OPTS=(--connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2)
           if ! command -v jq >/dev/null 2>&1; then
             echo "Missing required tool: jq"
@@ -87,7 +87,18 @@ jobs:
             echo "Refusing to extract archive with unsafe paths: ${QEMU_ASSET}"
             exit 1
           fi
-          tar xf "${QEMU_ASSET}" --no-same-owner --no-same-permissions
+          if tar -tvf "${QEMU_ASSET}" | awk 'substr($1, 1, 1) == "l" || substr($1, 1, 1) == "h" { found=1 } END { exit found ? 0 : 1 }'; then
+            echo "Refusing to extract archive with link entries: ${QEMU_ASSET}"
+            exit 1
+          fi
+          QEMU_EXTRACT_DIR=$(mktemp -d)
+          trap 'rm -rf "${QEMU_EXTRACT_DIR}"' EXIT
+          tar xf "${QEMU_ASSET}" -C "${QEMU_EXTRACT_DIR}" --no-same-owner --no-same-permissions
+          if [ ! -x "${QEMU_EXTRACT_DIR}/qemu/bin/qemu-system-riscv32" ]; then
+            echo "Extracted QEMU archive missing qemu/bin/qemu-system-riscv32"
+            exit 1
+          fi
+          mv "${QEMU_EXTRACT_DIR}/qemu" ./qemu
           echo "$PWD/qemu/bin" >> "$GITHUB_PATH"
           "$PWD/qemu/bin/qemu-system-riscv32" --version
 
