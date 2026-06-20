@@ -1,9 +1,9 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 use core::fmt::Write;
 use heapless::String as HString;
-use log::info;
 use heapless::Vec as HVec;
+use log::info;
 
 // 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
@@ -269,5 +269,293 @@ pub mod util {
         let _ = write!(&mut time_str, "{:02}:{:02}", minutes, seconds);
 
         time_str
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_state_is_displaying_time() {
+        let gadget = SmartGadget::new();
+        assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn button_press_from_time_goes_to_fetching() {
+        let mut gadget = SmartGadget::new();
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::FetchingQuote);
+    }
+
+    #[test]
+    fn quote_received_while_fetching_goes_to_displaying() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::FetchingQuote;
+        let quote = HString::<128>::from("Hello, world!");
+        gadget.handle_event(Event::QuoteReceived(quote.clone()));
+        assert_eq!(gadget.state, State::DisplayingQuote);
+        assert_eq!(gadget.current_quote, Some(quote));
+        assert_eq!(gadget.quote_line_offset, 0);
+    }
+
+    #[test]
+    fn button_press_from_quote_starts_countdown() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingQuote;
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::DisplayingCountdown);
+        assert_eq!(gadget.countdown_seconds, 30);
+        assert_eq!(gadget.countdown_original, 30);
+    }
+
+    #[test]
+    fn button_press_during_countdown_goes_to_time() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingCountdown;
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn fetch_failed_goes_back_to_time() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::FetchingQuote;
+        gadget.handle_event(Event::FetchFailed);
+        assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn countdown_tick_decrements() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingCountdown;
+        gadget.countdown_seconds = 10;
+        gadget.handle_event(Event::CountdownTick);
+        assert_eq!(gadget.countdown_seconds, 9);
+    }
+
+    #[test]
+    fn countdown_tick_at_zero_triggers_finished() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingCountdown;
+        gadget.countdown_seconds = 0;
+        gadget.handle_event(Event::CountdownTick);
+        assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn countdown_finished_goes_to_time() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingCountdown;
+        gadget.handle_event(Event::CountdownFinished);
+        assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn unhandled_combinations_are_noop() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::FetchingQuote;
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::FetchingQuote);
+
+        let mut g2 = SmartGadget::new();
+        let q = HString::<128>::from("test");
+        g2.handle_event(Event::QuoteReceived(q));
+        assert_eq!(g2.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn get_next_quote_cycles_through_quotes() {
+        let mut gadget = SmartGadget::new();
+        let first = gadget.get_next_quote();
+        let second = gadget.get_next_quote();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn get_next_quote_wraps_around() {
+        let mut gadget = SmartGadget::new();
+        let num_quotes = gadget.quotes.len();
+        for _ in 0..num_quotes {
+            gadget.get_next_quote();
+        }
+        let after_wrap = gadget.get_next_quote();
+        let mut g2 = SmartGadget::new();
+        let first = g2.get_next_quote();
+        assert_eq!(after_wrap, first);
+    }
+
+    #[test]
+    fn start_countdown_sets_both_fields() {
+        let mut gadget = SmartGadget::new();
+        gadget.start_countdown(60);
+        assert_eq!(gadget.countdown_seconds, 60);
+        assert_eq!(gadget.countdown_original, 60);
+    }
+
+    #[test]
+    fn tick_countdown_reduces_countdown() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingCountdown;
+        gadget.start_countdown(5);
+        gadget.tick_countdown();
+        assert_eq!(gadget.countdown_seconds, 4);
+    }
+
+    #[test]
+    fn tick_countdown_to_zero_finishes() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::DisplayingCountdown;
+        gadget.start_countdown(1);
+        gadget.tick_countdown();
+        assert_eq!(gadget.countdown_seconds, 0);
+        assert_eq!(gadget.state, State::DisplayingCountdown);
+        gadget.tick_countdown();
+        assert_eq!(gadget.state, State::DisplayingTime);
+    }
+
+    #[test]
+    fn scroll_quote_does_not_scroll_for_short_text() {
+        let mut gadget = SmartGadget::new();
+        gadget.quote_line_offset = 0;
+        gadget.scroll_quote(3);
+        assert_eq!(gadget.quote_line_offset, 0);
+    }
+
+    #[test]
+    fn scroll_quote_increments_for_long_text() {
+        let mut gadget = SmartGadget::new();
+        gadget.quote_line_offset = 0;
+        gadget.scroll_quote(5);
+        assert_eq!(gadget.quote_line_offset, 1);
+    }
+
+    #[test]
+    fn scroll_quote_wraps_around() {
+        let mut gadget = SmartGadget::new();
+        gadget.quote_line_offset = 3; // last valid offset for 5 lines (total_lines-1 = 4, so offset 3)
+        gadget.scroll_quote(5);
+        // (3 + 1) % (5 - 1) = 4 % 4 = 0
+        assert_eq!(gadget.quote_line_offset, 0);
+    }
+
+    // ── format_quote_lines ────────────────────────────────────────
+
+    #[test]
+    fn format_short_quote_single_line() {
+        let lines = util::format_quote_lines("Hello", 20, 4);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].as_str(), "Hello");
+    }
+
+    #[test]
+    fn format_quote_wraps_to_multiple_lines() {
+        let lines = util::format_quote_lines(
+            "this is a very long sentence that should wrap",
+            10,
+            8,
+        );
+        assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn format_quote_respects_max_lines() {
+        let long_text = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+        let lines = util::format_quote_lines(long_text, 5, 3);
+        assert!(lines.len() <= 3);
+    }
+
+    #[test]
+    fn format_long_word_broken_across_lines() {
+        let lines = util::format_quote_lines("supercalifragilisticexpialidocious", 10, 8);
+        // The long word should be broken into chunks
+        assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn format_quote_preserves_words_when_possible() {
+        let lines = util::format_quote_lines("hello world test", 20, 4);
+        // All words fit on one line
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].as_str(), "hello world test");
+    }
+
+    // ── format_time ───────────────────────────────────────────────
+
+    #[test]
+    fn format_time_zero_seconds_no_hours() {
+        let result = util::format_time(0, false);
+        assert_eq!(result.as_str(), "00:00");
+    }
+
+    #[test]
+    fn format_time_minutes_and_seconds() {
+        let result = util::format_time(65, false);
+        assert_eq!(result.as_str(), "01:05");
+    }
+
+    #[test]
+    fn format_time_with_hours() {
+        let result = util::format_time(3661, true); // 1h 1m 1s
+        assert_eq!(result.as_str(), "01:01:01");
+    }
+
+    #[test]
+    fn format_time_large_value_with_hours() {
+        let result = util::format_time(86399, true); // 23:59:59
+        assert_eq!(result.as_str(), "23:59:59");
+    }
+
+    #[test]
+    fn format_time_midnight_rollover() {
+        let result = util::format_time(86400, true); // 24:00:00
+        assert_eq!(result.as_str(), "24:00:00");
+    }
+
+    // ── simulate_quote_fetch integration ──────────────────────────
+
+    #[test]
+    fn simulate_quote_fetch_transitions_state() {
+        let mut gadget = SmartGadget::new();
+        gadget.state = State::FetchingQuote;
+        gadget.simulate_quote_fetch();
+        assert_eq!(gadget.state, State::DisplayingQuote);
+        assert!(gadget.current_quote.is_some());
+    }
+
+    // ── full user-interaction flow ────────────────────────────────
+
+    #[test]
+    fn full_interaction_flow() {
+        let mut gadget = SmartGadget::new();
+
+        // 1. Start: DisplayingTime
+        assert_eq!(gadget.state, State::DisplayingTime);
+
+        // 2. Press button → FetchingQuote
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::FetchingQuote);
+
+        // 3. Quote arrives → DisplayingQuote
+        let quote = HString::<128>::from("A journey of a thousand miles begins with a single step.");
+        gadget.handle_event(Event::QuoteReceived(quote));
+        assert_eq!(gadget.state, State::DisplayingQuote);
+
+        // 4. Press button → DisplayingCountdown (30s)
+        gadget.handle_event(Event::ButtonPress);
+        assert_eq!(gadget.state, State::DisplayingCountdown);
+        assert_eq!(gadget.countdown_seconds, 30);
+
+        // 5. Countdown ticks down to zero
+        for _ in 0..29 {
+            gadget.tick_countdown();
+        }
+        assert_eq!(gadget.countdown_seconds, 1);
+        gadget.tick_countdown();
+        assert_eq!(gadget.countdown_seconds, 0);
+        assert_eq!(gadget.state, State::DisplayingCountdown);
+        gadget.tick_countdown();
+        assert_eq!(gadget.state, State::DisplayingTime);
     }
 }
