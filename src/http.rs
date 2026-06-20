@@ -1,303 +1,255 @@
-//! Minimal HTTP client module for embedded ESP32-C3.
+//! HTTP/HTTPS client module for embedded ESP32-C3.
 //!
-//! Provides a **blocking** HTTP/1.1 client that operates over raw TCP
-//! sockets on the smoltcp network stack provided by the WiFi module.
+//! Provides a **blocking** HTTP/1.1 client that can operate over TLS (HTTPS)
+//! using `embedded-tls` 0.19 (TLS 1.3, no_std, no allocator).
 //!
-//! Supports GET and POST with configurable buffer sizes.
+//! # Security Note
 //!
-//! # Security Warning
-//!
-//! This client uses unencrypted HTTP over plain TCP. Do not transmit
-//! passwords, tokens, or personal data through it. It is intended only for
-//! local, trusted networks.
+//! TLS certificate verification is currently **disabled** (`UnsecureProvider`/
+//! `NoVerify`) because `embedded-tls`'s `webpki` verifier requires `alloc`,
+//! which this no_std firmware does not enable.  The connection is still
+//! encrypted (TLS 1.3 with AES-128-GCM) and resistant to passive
+//! eavesdropping, but is **not** protected against active man-in-the-middle
+//! attacks.  This is acceptable for fetching public price data; for anything
+//! sensitive, enable `alloc` and use a real `CertVerifier`.
 //!
 //! # Limitations
 //!
-//! - **IP addresses only** (no DNS resolution). Use the server's IPv4 address.
-//! - **HTTP only** (no TLS/HTTPS).
+//! - HTTPS only (plain HTTP not supported by the high-level API — the device
+//!   should always use TLS for external APIs).
 //! - Response body is truncated if it exceeds the caller's buffer.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use blink::http::HttpClient;
-//!
-//! let mut client = HttpClient::new();
-//! let mut buf = [0u8; 512];
-//! let resp = client.get(wifi.resources(), "93.184.216.34", 80, "/", &mut buf)?;
-//! // resp.status_code, buf[..resp.body_len] contain the response
-//! ```
+//! - DNS resolution is performed via the smoltcp DNS socket.
 
-#[cfg(target_arch = "riscv32")]
+// ── Shared parsing helpers (compiled on host AND target) ────────
+
+use core::fmt::Write as _;
+use heapless::String as HString;
+
+/// Errors that can occur during HTTP operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HttpError {
+    ConnectionFailed,
+    SendFailed,
+    RecvFailed,
+    ParseError,
+    InvalidUrl,
+    BodyTooLarge,
+    DnsFailed,
+    TlsFailed,
+}
+
+/// A parsed HTTP response.
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    pub status_code: u16,
+    pub body_len: usize,
+}
+
+/// Reject HTTP request tokens that contain control characters which could
+/// break the request line or headers (`\r`, `\n`, `\0`).
+fn validate_http_token(s: &str) -> Result<(), HttpError> {
+    if s.bytes().any(|b| b == b'\r' || b == b'\n' || b == b'\0') {
+        return Err(HttpError::InvalidUrl);
+    }
+    Ok(())
+}
+
+/// Build an HTTP/1.1 GET request string.
+///
+/// Shared between host and target so the request format can be tested on host.
+pub fn build_get_request(host: &str, path: &str) -> Result<HString<512>, HttpError> {
+    validate_http_token(host)?;
+    validate_http_token(path)?;
+    let mut req = HString::<512>::new();
+    write!(&mut req, "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: blink/0.1\r\n\r\n", path, host)
+        .map_err(|_| HttpError::SendFailed)?;
+    Ok(req)
+}
+
+/// Parse an HTTP/1.1 response from raw bytes.
+///
+/// Extracts the status code and copies everything after the headers into
+/// `body_buf`.  Shared between host and target so it can be tested on host.
+pub fn parse_http_response(raw: &[u8], body_buf: &mut [u8]) -> Result<HttpResponse, HttpError> {
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(raw.len());
+
+    let header_text =
+        core::str::from_utf8(&raw[..header_end]).map_err(|_| HttpError::ParseError)?;
+
+    let status_end = header_text.find("\r\n").unwrap_or(header_text.len());
+    let status_line = &header_text[..status_end];
+
+    let mut parts = status_line.splitn(3, ' ');
+    let version = parts.next().ok_or(HttpError::ParseError)?;
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err(HttpError::ParseError);
+    }
+    let code_str = parts.next().ok_or(HttpError::ParseError)?;
+    let status_code: u16 = code_str.parse().map_err(|_| HttpError::ParseError)?;
+
+    let body_start = if header_end < raw.len() {
+        header_end + 4
+    } else {
+        raw.len()
+    };
+    let body = &raw[body_start..];
+
+    let copy_len = body.len().min(body_buf.len());
+    body_buf[..copy_len].copy_from_slice(&body[..copy_len]);
+
+    Ok(HttpResponse {
+        status_code,
+        body_len: copy_len,
+    })
+}
+
+// ── Target implementation (riscv32 + network feature) ──────────
+
+#[cfg(all(target_arch = "riscv32", feature = "network"))]
 mod inner {
-    use core::fmt::Write;
+    use super::{build_get_request, parse_http_response, HttpError, HttpResponse};
+    use crate::wifi::NetworkStack;
+    use embedded_tls::blocking::{TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
+    use embedded_tls::Aes128GcmSha256;
+    use esp_hal::rng::Rng;
+    use rand_core::{CryptoRng, RngCore};
 
-    use esp_wifi::wifi_interface::WifiStack;
-    use heapless::String as HString;
-    use smoltcp::socket::tcp;
-    use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
+    /// Static buffers for TLS records (too large for the stack).
+    /// 16 KiB read buffer is required for the TLS handshake (server certificate).
+    static mut TLS_READ_BUF: [u8; 16384] = [0; 16384];
+    static mut TLS_WRITE_BUF: [u8; 4096] = [0; 4096];
 
-    use crate::wifi::WifiResources;
-
-    /// Errors that can occur during HTTP operations.
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum HttpError {
-        /// TCP connection to the server failed.
-        ConnectionFailed,
-        /// Failed to send the HTTP request.
-        SendFailed,
-        /// Failed to receive data from the server.
-        RecvFailed,
-        /// The HTTP response could not be parsed.
-        ParseError,
-        /// The URL or host string was malformed.
-        InvalidUrl,
-        /// The response body is larger than the caller's buffer.
-        BodyTooLarge,
-    }
-
-    /// A parsed HTTP response.
-    #[derive(Debug, Clone)]
-    pub struct HttpResponse {
-        /// HTTP status code (e.g., 200, 404, 500).
-        pub status_code: u16,
-        /// Number of body bytes written into the caller's buffer.
-        pub body_len: usize,
-    }
-
-    // ── Internal constants ────────────────────────────────────────
-
-    /// Buffer size for raw HTTP response.
-    const RX_CAPACITY: usize = 1024;
-    /// Poll iterations before timing out a connection/request.
-    const MAX_POLL_ITER: usize = 2000;
-
-    /// A minimal, blocking HTTP client for ESP32-C3.
+    /// Wrapper around `esp_hal::rng::Rng` that also implements `CryptoRng`,
+    /// which `embedded-tls` requires.
     ///
-    /// Owns internal buffers for TCP socket operations. Designed to be
-    /// used with the [`WifiResources`] obtained from [`WifiManager`].
-    pub struct HttpClient {
-        tcp_rx_buf: [u8; 1024],
-        tcp_tx_buf: [u8; 1024],
+    /// The ESP32-C3 hardware RNG produces true random numbers when the RF
+    /// (WiFi) subsystem is enabled, satisfying the `CryptoRng` contract.
+    struct CryptoRngWrapper {
+        rng: Rng,
     }
+
+    impl CryptoRngWrapper {
+        fn new() -> Self {
+            // `esp_wifi::init` consumed the original `RNG` peripheral, but the
+            // hardware register is still accessible.  Steal a new instance.
+            let stolen = unsafe { esp_hal::peripherals::RNG::steal() };
+            Self {
+                rng: Rng::new(stolen),
+            }
+        }
+    }
+
+    impl RngCore for CryptoRngWrapper {
+        fn next_u32(&mut self) -> u32 {
+            self.rng.next_u32()
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.rng.next_u64()
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            self.rng.fill_bytes(dest)
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.rng.try_fill_bytes(dest)
+        }
+    }
+
+    impl CryptoRng for CryptoRngWrapper {}
+
+    /// A minimal, blocking HTTPS client for ESP32-C3.
+    ///
+    /// Uses `embedded-tls` 0.19 (TLS 1.3) over a smoltcp TCP socket provided
+    /// by [`NetworkStack`].
+    pub struct HttpClient;
 
     impl HttpClient {
-        /// Create a new HTTP client with default (1 KiB) socket buffers.
         pub fn new() -> Self {
-            Self {
-                tcp_rx_buf: [0u8; 1024],
-                tcp_tx_buf: [0u8; 1024],
-            }
+            Self
         }
 
-        /// Perform an HTTP **GET** request.
+        /// Perform an HTTPS **GET** request.
         ///
         /// # Arguments
-        /// * `resources` — WiFi resources from `WifiManager::resources()`.
-        /// * `host` — Server IPv4 address as a dotted string, e.g. `"192.168.1.100"`.
-        /// * `port` — TCP port (usually 80 for plain HTTP).
-        /// * `path` — Request path, e.g. `"/api/status"`.
+        /// * `stack` — Network stack with WiFi connected and DHCP configured.
+        /// * `host` — Server hostname (e.g. `"api.binance.com"`). DNS is resolved
+        ///   automatically.
+        /// * `path` — Request path (e.g. `"/api/v3/ticker/price?symbol=BTCUSDT"`).
         /// * `resp_body` — Buffer where the response body will be written.
-        ///
-        /// # Returns
-        /// `HttpResponse` with the status code and number of bytes written
-        /// to `resp_body`.
-        pub fn get(
+        pub fn get_https(
             &mut self,
-            resources: &mut WifiResources<'_>,
+            stack: &mut NetworkStack<'_>,
             host: &str,
-            port: u16,
             path: &str,
             resp_body: &mut [u8],
         ) -> Result<HttpResponse, HttpError> {
-            let ip = parse_ipv4(host)?;
-            let endpoint = IpEndpoint::new(IpAddress::Ipv4(ip), port);
-            self.do_request(resources, endpoint, host, "GET", path, &[], resp_body)
-        }
+            // 1. DNS resolve
+            let ip = stack
+                .resolve_dns(host)
+                .map_err(|_| HttpError::DnsFailed)?;
 
-        /// Perform an HTTP **POST** request.
-        ///
-        /// # Arguments
-        /// * `resources` — WiFi resources from `WifiManager::resources()`.
-        /// * `host` — Server IPv4 address as a dotted string.
-        /// * `port` — TCP port (usually 80 for plain HTTP).
-        /// * `path` — Request path.
-        /// * `body` — Request body bytes (e.g., JSON payload).
-        /// * `resp_body` — Buffer where the response body will be written.
-        ///
-        /// # Returns
-        /// `HttpResponse` with the status code and number of bytes written
-        /// to `resp_body`.
-        pub fn post(
-            &mut self,
-            resources: &mut WifiResources<'_>,
-            host: &str,
-            port: u16,
-            path: &str,
-            body: &[u8],
-            resp_body: &mut [u8],
-        ) -> Result<HttpResponse, HttpError> {
-            let ip = parse_ipv4(host)?;
-            let endpoint = IpEndpoint::new(IpAddress::Ipv4(ip), port);
-            self.do_request(resources, endpoint, host, "POST", path, body, resp_body)
-        }
-
-        // ── internal request engine ──────────────────────────────
-
-        fn do_request(
-            &mut self,
-            resources: &mut WifiResources<'_>,
-            endpoint: IpEndpoint,
-            host: &str,
-            method: &str,
-            path: &str,
-            body: &[u8],
-            resp_body: &mut [u8],
-        ) -> Result<HttpResponse, HttpError> {
-            // Reject control characters in request tokens to prevent header injection.
-            validate_http_token(host)?;
-            validate_http_token(path)?;
-            validate_http_token(method)?;
-            // ── Build HTTP request ────────────────────────────────
-            let mut req: HString<1024> = HString::new();
-
-            // Request line
-            write!(&mut req, "{} {} HTTP/1.1\r\n", method, path)
-                .map_err(|_| HttpError::SendFailed)?;
-
-            // Headers
-            write!(&mut req, "Host: {}\r\n", host).map_err(|_| HttpError::SendFailed)?;
-            write!(&mut req, "Connection: close\r\n").map_err(|_| HttpError::SendFailed)?;
-
-            if !body.is_empty() {
-                write!(&mut req, "Content-Length: {}\r\n", body.len())
-                    .map_err(|_| HttpError::SendFailed)?;
-                write!(&mut req, "Content-Type: application/octet-stream\r\n")
-                    .map_err(|_| HttpError::SendFailed)?;
-            }
-
-            write!(&mut req, "\r\n").map_err(|_| HttpError::SendFailed)?;
-
-            let req_bytes = req.as_bytes();
-
-            // ── Create TCP socket ─────────────────────────────────
-            let rx_buf = &mut self.tcp_rx_buf[..];
-            let tx_buf = &mut self.tcp_tx_buf[..];
-
-            let tcp_socket = smoltcp::socket::tcp::Socket::new(
-                smoltcp::socket::tcp::SocketBuffer::new(rx_buf),
-                smoltcp::socket::tcp::SocketBuffer::new(tx_buf),
-            );
-
-            let mut sockets = resources.stack.socket_set();
-            let handle = sockets
-                .add(tcp_socket)
+            // 2. TCP connect to port 443
+            let handle = stack
+                .tcp_connect(ip, 443)
                 .map_err(|_| HttpError::ConnectionFailed)?;
 
-            // ── Connect ───────────────────────────────────────────
-            {
-                let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-                let mut cx = resources.stack.interface().context();
-                sock.connect(&mut cx, endpoint, |_, _| {}).map_err(|_| {
-                    sockets.remove(handle);
-                    HttpError::ConnectionFailed
-                })?;
-            }
+            // 3. Create embedded-io bridge + TLS connection
+            let io = stack.tcp_io(handle);
 
-            // Wait for the TCP handshake to complete
-            let mut handshake_ok = false;
-            for _ in 0..MAX_POLL_ITER {
-                resources.stack.work();
-                let sock = sockets.get::<smoltcp::socket::tcp::Socket>(handle);
-                if !sock.is_open() {
-                    break;
-                }
-                if sock.may_send() {
-                    handshake_ok = true;
-                    break;
-                }
-            }
-            if !handshake_ok {
-                sockets.remove(handle);
-                return Err(HttpError::ConnectionFailed);
-            }
+            let mut tls = TlsConnection::new(
+                io,
+                unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) },
+                unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) },
+            );
 
-            // ── Send request (headers + optional body) ────────────
-            let all_send = [req_bytes, body];
-            for chunk in &all_send {
-                if chunk.is_empty() {
-                    continue;
+            // 4. TLS handshake (no certificate verification — see module docs)
+            let config = TlsConfig::new().with_server_name(host);
+            let rng = CryptoRngWrapper::new();
+            let context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(rng));
+
+            tls.open(context).map_err(|_| HttpError::TlsFailed)?;
+
+            // 5. Send HTTP request
+            let request = build_get_request(host, path)?;
+            tls.write(request.as_bytes())
+                .map_err(|_| HttpError::SendFailed)?;
+            tls.flush().ok();
+
+            // 6. Read response — read until EOF (Connection: close) or buffer full
+            let mut raw_buf: [u8; 2048] = [0; 2048];
+            let mut total = 0usize;
+            loop {
+                if total >= raw_buf.len() {
+                    break; // buffer full
                 }
-                let mut sent = 0usize;
-                for _ in 0..MAX_POLL_ITER {
-                    if sent >= chunk.len() {
-                        break;
-                    }
-                    resources.stack.work();
-                    let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-                    if sock.can_send() {
-                        match sock.send_slice(&chunk[sent..]) {
-                            Ok(n) => sent += n,
-                            Err(tcp::SendError::InvalidState) => continue,
-                            Err(_) => {
-                                sockets.remove(handle);
-                                return Err(HttpError::SendFailed);
-                            }
+                let n = match tls.read(&mut raw_buf[total..]) {
+                    Ok(0) => break, // EOF — server closed connection
+                    Ok(n) => n,
+                    Err(_) => {
+                        // If we already have some data, try to parse it
+                        if total > 0 {
+                            break;
                         }
+                        return Err(HttpError::RecvFailed);
                     }
-                }
-                if sent < chunk.len() {
-                    sockets.remove(handle);
-                    return Err(HttpError::SendFailed);
-                }
+                };
+                total += n;
             }
 
-            // Signal we're done writing
-            {
-                let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-                sock.close();
-            }
+            // 7. Drop TLS connection (releases borrow on stack)
+            drop(tls);
 
-            // ── Receive response ──────────────────────────────────
-            let mut rx_buf: [u8; RX_CAPACITY] = [0u8; RX_CAPACITY];
-            let mut rx_total = 0usize;
-            let mut recv_complete = false;
+            // 8. Close TCP socket
+            stack.tcp_close(handle);
 
-            for _ in 0..MAX_POLL_ITER {
-                resources.stack.work();
-                let mut sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-                if !sock.may_recv() {
-                    recv_complete = true;
-                    break;
-                }
-                if sock.can_recv() {
-                    let space = &mut rx_buf[rx_total..];
-                    match sock.recv_slice(space) {
-                        Ok(0) => {
-                            recv_complete = true;
-                            break; // peer closed
-                        }
-                        Ok(n) => {
-                            rx_total += n;
-                            if rx_total >= rx_buf.len() {
-                                recv_complete = true;
-                                break;
-                            }
-                        }
-                        Err(tcp::RecvError::InvalidState) => continue,
-                        Err(_) => break,
-                    }
-                }
-            }
-
-            sockets.remove(handle);
-
-            if !recv_complete {
+            if total == 0 {
                 return Err(HttpError::RecvFailed);
             }
 
-            // ── Parse HTTP response ───────────────────────────────
-            parse_http_response(&rx_buf[..rx_total], resp_body)
+            // 9. Parse HTTP response
+            parse_http_response(&raw_buf[..total], resp_body)
         }
     }
 
@@ -306,105 +258,13 @@ mod inner {
             Self::new()
         }
     }
-
-    // ── Helpers ───────────────────────────────────────────────────
-
-    /// Parse an IPv4 address from a dotted-decimal string.
-    fn parse_ipv4(s: &str) -> Result<Ipv4Address, HttpError> {
-        let mut octets = [0u8; 4];
-        let mut iter = s.split('.');
-        for i in 0..4 {
-            let part = iter.next().ok_or(HttpError::InvalidUrl)?;
-            if part.is_empty() || part.len() > 3 {
-                return Err(HttpError::InvalidUrl);
-            }
-            let value: u8 = part.parse().map_err(|_| HttpError::InvalidUrl)?;
-            octets[i] = value;
-        }
-        if iter.next().is_some() {
-            return Err(HttpError::InvalidUrl);
-        }
-        Ok(Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]))
-    }
-
-    /// Reject HTTP request tokens that contain control characters which could
-    /// break the request line or headers (`\r`, `\n`, `\0`).
-    fn validate_http_token(s: &str) -> Result<(), HttpError> {
-        if s.bytes().any(|b| b == b'\r' || b == b'\n' || b == b'\0') {
-            return Err(HttpError::InvalidUrl);
-        }
-        Ok(())
-    }
-
-    /// Parse an HTTP/1.1 response from raw bytes.
-    ///
-    /// Extracts the status code and copies everything after the headers into
-    /// `body_buf`. The implementation does not interpret `Content-Length`; it
-    /// treats all bytes following the header block as the response body.
-    fn parse_http_response(raw: &[u8], body_buf: &mut [u8]) -> Result<HttpResponse, HttpError> {
-        // Parse only the status line + headers as text, before the double CRLF.
-        let header_end = raw
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .unwrap_or(raw.len());
-
-        let header_text =
-            core::str::from_utf8(&raw[..header_end]).map_err(|_| HttpError::ParseError)?;
-
-        // ── Status line ───────────────────────────────────────────
-        let status_end = header_text.find("\r\n").unwrap_or(header_text.len());
-        let status_line = &header_text[..status_end];
-
-        let mut parts = status_line.splitn(3, ' ');
-        let version = parts.next().ok_or(HttpError::ParseError)?;
-        if version != "HTTP/1.1" {
-            return Err(HttpError::ParseError);
-        }
-        let code_str = parts.next().ok_or(HttpError::ParseError)?;
-        let status_code: u16 = code_str.parse().map_err(|_| HttpError::ParseError)?;
-
-        // ── Copy body (after double CRLF) ─────────────────────────
-        let body_start = if header_end < raw.len() {
-            header_end + 4
-        } else {
-            raw.len()
-        };
-        let body = &raw[body_start..];
-
-        let copy_len = body.len().min(body_buf.len());
-        body_buf[..copy_len].copy_from_slice(&body[..copy_len]);
-
-        Ok(HttpResponse {
-            status_code,
-            body_len: copy_len,
-        })
-    }
 }
 
-#[cfg(target_arch = "riscv32")]
-pub use inner::*;
+// ── Host-side stubs (host or no network feature) ───────────────
 
-// ── Host-side stubs (for `cargo test` on the host) ──────────────
-
-#[cfg(not(target_arch = "riscv32"))]
+#[cfg(not(all(target_arch = "riscv32", feature = "network")))]
 mod inner {
-    use crate::wifi::WifiResources;
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum HttpError {
-        ConnectionFailed,
-        SendFailed,
-        RecvFailed,
-        ParseError,
-        InvalidUrl,
-        BodyTooLarge,
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct HttpResponse {
-        pub status_code: u16,
-        pub body_len: usize,
-    }
+    use super::{HttpError, HttpResponse};
 
     /// Stub HTTP client for host-side compilation/testing.
     pub struct HttpClient;
@@ -414,25 +274,11 @@ mod inner {
             Self
         }
 
-        pub fn get(
+        pub fn get_https(
             &mut self,
-            _resources: &mut WifiResources<'_>,
-            _host: &str,
-            _port: u16,
-            _path: &str,
             _resp_body: &mut [u8],
-        ) -> Result<HttpResponse, HttpError> {
-            Err(HttpError::ConnectionFailed)
-        }
-
-        pub fn post(
-            &mut self,
-            _resources: &mut WifiResources<'_>,
             _host: &str,
-            _port: u16,
             _path: &str,
-            _body: &[u8],
-            _resp_body: &mut [u8],
         ) -> Result<HttpResponse, HttpError> {
             Err(HttpError::ConnectionFailed)
         }
@@ -445,83 +291,109 @@ mod inner {
     }
 }
 
-#[cfg(not(target_arch = "riscv32"))]
+#[cfg(all(target_arch = "riscv32", feature = "network"))]
+pub use inner::*;
+
+#[cfg(not(all(target_arch = "riscv32", feature = "network")))]
 pub use inner::*;
 
 // ── Tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    #![allow(unused_imports)]
-
     use super::*;
 
-    // These tests exercise the parsers — they run on the host as well.
-
-    /// Helper: test IPv4 parser (no-op on host stubs).
-    fn run_parse_ipv4(s: &str, expected: Option<[u8; 4]>) {
-        #[cfg(target_arch = "riscv32")]
-        {
-            let result = inner::parse_ipv4(s);
-            match expected {
-                Some(bytes) => {
-                    let ip = result.unwrap();
-                    assert_eq!(ip.as_bytes(), &bytes);
-                }
-                None => assert!(result.is_err()),
-            }
-        }
-        // On host, the inner module is stubbed; skip gracefully.
-        let _ = (s, expected);
-    }
-
-    /// Helper: test HTTP response parser (no-op on host stubs).
-    fn run_parse_response(raw: &[u8], want_code: u16, want_body_prefix: &[u8]) {
-        #[cfg(target_arch = "riscv32")]
-        {
-            let mut buf = [0u8; 128];
-            let resp = inner::parse_http_response(raw, &mut buf).unwrap();
-            assert_eq!(resp.status_code, want_code);
-            assert!(buf[..resp.body_len].starts_with(want_body_prefix));
-        }
-        let _ = (raw, want_code, want_body_prefix);
+    #[test]
+    fn build_get_request_basic() {
+        let req = build_get_request("api.binance.com", "/api/v3/ticker/price?symbol=BTCUSDT").unwrap();
+        assert!(req.as_str().starts_with("GET /api/v3/ticker/price?symbol=BTCUSDT HTTP/1.1\r\n"));
+        assert!(req.as_str().contains("Host: api.binance.com\r\n"));
+        assert!(req.as_str().contains("Connection: close\r\n"));
+        assert!(req.as_str().ends_with("\r\n\r\n"));
     }
 
     #[test]
-    fn parse_ipv4_valid() {
-        run_parse_ipv4("192.168.1.1", Some([192, 168, 1, 1]));
+    fn build_get_request_rejects_newline_in_host() {
+        let result = build_get_request("evil.com\r\nInjected: yes", "/path");
+        assert!(result.is_err());
     }
 
     #[test]
-    fn parse_ipv4_localhost() {
-        run_parse_ipv4("127.0.0.1", Some([127, 0, 0, 1]));
-    }
-
-    #[test]
-    fn parse_ipv4_invalid_too_few() {
-        run_parse_ipv4("10.0.0", None);
-    }
-
-    #[test]
-    fn parse_ipv4_invalid_text() {
-        run_parse_ipv4("not.an.ip.address", None);
+    fn build_get_request_rejects_newline_in_path() {
+        let result = build_get_request("api.binance.com", "/path\r\nInjected: yes");
+        assert!(result.is_err());
     }
 
     #[test]
     fn response_200_with_body() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello World!";
-        run_parse_response(raw, 200, b"Hello World!");
+        let mut buf = [0u8; 128];
+        let resp = parse_http_response(raw, &mut buf).unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert!(buf[..resp.body_len].starts_with(b"Hello World!"));
     }
 
     #[test]
     fn response_404_no_body() {
         let raw = b"HTTP/1.1 404 Not Found\r\n\r\n";
-        run_parse_response(raw, 404, b"");
+        let mut buf = [0u8; 128];
+        let resp = parse_http_response(raw, &mut buf).unwrap();
+        assert_eq!(resp.status_code, 404);
+        assert_eq!(resp.body_len, 0);
     }
 
     #[test]
     fn response_500_with_json() {
         let raw = b"HTTP/1.1 500 Internal Server Error\r\n\r\n{\"error\":\"boom\"}";
-        run_parse_response(raw, 500, b"{\"error\":\"boom\"}");
+        let mut buf = [0u8; 128];
+        let resp = parse_http_response(raw, &mut buf).unwrap();
+        assert_eq!(resp.status_code, 500);
+        assert!(buf[..resp.body_len].starts_with(b"{\"error\":\"boom\"}"));
+    }
+
+    #[test]
+    fn response_with_binance_json() {
+        // Real Binance API response format
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 49\r\n\r\n{\"symbol\":\"BTCUSDT\",\"price\":\"63617.99000000\"}";
+        let mut buf = [0u8; 256];
+        let resp = parse_http_response(raw, &mut buf).unwrap();
+        assert_eq!(resp.status_code, 200);
+        let body = core::str::from_utf8(&buf[..resp.body_len]).unwrap();
+        assert!(body.contains("\"price\":\"63617.99000000\""));
+    }
+
+    #[test]
+    fn response_truncates_body_to_buffer() {
+        let raw = b"HTTP/1.1 200 OK\r\n\r\nABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut buf = [0u8; 5];
+        let resp = parse_http_response(raw, &mut buf).unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body_len, 5);
+        assert_eq!(&buf, b"ABCDE");
+    }
+
+    #[test]
+    fn response_http_1_0_accepted() {
+        let raw = b"HTTP/1.0 200 OK\r\n\r\nbody";
+        let mut buf = [0u8; 64];
+        let resp = parse_http_response(raw, &mut buf).unwrap();
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(&buf[..resp.body_len], b"body");
+    }
+
+    #[test]
+    fn response_invalid_version_rejected() {
+        let raw = b"HTTP/2.0 200 OK\r\n\r\nbody";
+        let mut buf = [0u8; 64];
+        assert!(parse_http_response(raw, &mut buf).is_err());
+    }
+
+    #[test]
+    fn response_empty_body() {
+        let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let mut buf = [0u8; 64];
+        let resp = parse_http_response(raw, &mut buf).unwrap();
+        assert_eq!(resp.status_code, 204);
+        assert_eq!(resp.body_len, 0);
     }
 }

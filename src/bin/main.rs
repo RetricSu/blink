@@ -18,6 +18,30 @@ use esp_hal::time::RateExtU32;
 use log::info;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
+#[cfg(feature = "network")]
+use blink::price::fetch_price;
+#[cfg(feature = "network")]
+use blink::wifi::NetworkStack;
+
+#[cfg(feature = "network")]
+const WIFI_SSID: &str = "YOUR_SSID";
+#[cfg(feature = "network")]
+const WIFI_PASSWORD: &str = "YOUR_PASSWORD";
+
+fn init_heap() {
+    const HEAP_SIZE: usize = 64 * 1024;
+    static mut HEAP: core::mem::MaybeUninit<[u8; HEAP_SIZE]> = core::mem::MaybeUninit::uninit();
+    unsafe {
+        let ptr = core::ptr::addr_of_mut!(HEAP) as *mut core::mem::MaybeUninit<[u8; HEAP_SIZE]>;
+        let heap_bottom = (*ptr).as_mut_ptr() as *mut u8;
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            heap_bottom,
+            HEAP_SIZE,
+            esp_alloc::MemoryCapability::Internal.into(),
+        ));
+    }
+}
+
 #[main]
 fn main() -> ! {
     macro_rules! draw_text {
@@ -57,11 +81,33 @@ fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    init_heap();
+
+    // ── Network stack (when `network` feature is enabled) ──────
+    #[cfg(feature = "network")]
+    let mut network_stack: Option<NetworkStack<'_>> = {
+        match NetworkStack::init(
+            peripherals.TIMG0,
+            peripherals.RNG,
+            peripherals.RADIO_CLK,
+            peripherals.WIFI,
+        ) {
+            Ok(stack) => {
+                info!("WiFi hardware initialized");
+                Some(stack)
+            }
+            Err(e) => {
+                info!("WiFi init failed: {:?}, will use simulation", e);
+                None
+            }
+        }
+    };
+
+    // ── Display (uses remaining peripherals) ───────────────────
     let sda = peripherals.GPIO8;
     let scl = peripherals.GPIO9;
 
-    // Create I2C with proper configuration
-    let i2c_config = esp_hal::i2c::master::Config::default().with_frequency(100u32.kHz()); // Try 100 kHz for better compatibility
+    let i2c_config = esp_hal::i2c::master::Config::default().with_frequency(100u32.kHz());
 
     let i2c = I2c::new(peripherals.I2C0, i2c_config)
         .unwrap()
@@ -74,47 +120,77 @@ fn main() -> ! {
     let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
 
-    // Initialize display with error handling
     match display.init() {
         Ok(_) => info!("Display initialized successfully"),
         Err(e) => {
             info!("Failed to initialize display: {:?}", e);
-            // Continue anyway, but log the error
         }
     }
 
     let text_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let delay = Delay::new();
 
-    // Initialize the state machine
+    // ── Connect WiFi (when network is available) ───────────────
+    #[cfg(feature = "network")]
+    {
+        if let Some(ref mut stack) = network_stack {
+            if let Err(e) = display.clear(BinaryColor::Off) {
+                info!("Failed to clear display: {:?}", e);
+            }
+            draw_text!(display, "Connecting WiFi", Point::new(0, 16), text_style, "Failed to draw");
+            flush_display!(display, delay, "wifi connecting");
+
+            match stack.connect(WIFI_SSID, WIFI_PASSWORD) {
+                Ok(_) => info!("WiFi connected, waiting for DHCP..."),
+                Err(e) => info!("WiFi connect failed: {:?}, using simulation", e),
+            }
+
+            // Wait for DHCP to assign an IP (up to ~15 seconds)
+            for _ in 0..150 {
+                stack.poll();
+                if stack.is_network_ready() {
+                    info!("Network ready (DHCP configured)");
+                    break;
+                }
+                delay.delay_millis(100);
+            }
+            if !stack.is_network_ready() {
+                info!("DHCP timeout, will use simulation for prices");
+            }
+        }
+    }
+
+    // ── State machine init ─────────────────────────────────────
     let mut gadget = SmartGadget::new();
 
-    // Start with displaying a quote
     gadget.handle_event(Event::ButtonPress);
     gadget.simulate_quote_fetch();
 
     let mut counter = 0;
-    let mut seconds_elapsed = 0u32; // Track seconds since boot
+    let mut seconds_elapsed = 0u32;
 
     loop {
-        // Simulate button press every 5 seconds for demo
+        // Poll the network stack every iteration
+        #[cfg(feature = "network")]
+        {
+            if let Some(ref mut stack) = network_stack {
+                stack.poll();
+            }
+        }
+
         counter += 1;
         if counter % 50 == 0 {
-            // Every 5 seconds (50 * 100ms)
             info!("Simulating button press!");
             gadget.handle_event(Event::ButtonPress);
         }
 
-        // Update time tracking every 10 iterations (approximately every second)
         if counter % 10 == 0 {
             seconds_elapsed += 1;
-            // Also tick countdown if we're in countdown mode
             if gadget.state == State::DisplayingCountdown {
                 gadget.tick_countdown();
             }
         }
 
-        // Handle state transitions
         match gadget.state {
             State::DisplayingTime => {
                 info!("Displaying time: {}", seconds_elapsed);
@@ -123,7 +199,6 @@ fn main() -> ! {
                     continue;
                 }
 
-                // Format and display the current time - centered for 128x32 screen
                 let time_string = util::format_time(seconds_elapsed, true);
                 draw_text!(
                     display,
@@ -141,7 +216,6 @@ fn main() -> ! {
                     "Failed to draw text"
                 );
 
-                // Flush with retry logic
                 flush_display!(display, delay, "time display");
             }
 
@@ -160,10 +234,8 @@ fn main() -> ! {
                     "Failed to draw text"
                 );
 
-                // Flush with retry logic
                 flush_display!(display, delay, "loading display");
 
-                // Simulate quote fetching
                 delay.delay_millis(1000);
                 gadget.simulate_quote_fetch();
             }
@@ -176,18 +248,14 @@ fn main() -> ! {
                 }
 
                 if let Some(quote) = &gadget.current_quote {
-                    // Split quote into lines for display
                     let lines = util::format_quote_lines(quote, 20, 8);
 
-                    // Auto-scroll through long quotes every 4 seconds for better readability
                     if counter % 40 == 0 && lines.len() > 3 {
                         gadget.scroll_quote(lines.len());
                     }
 
-                    // Display current lines based on scroll offset
                     let start_idx = gadget.quote_line_offset;
 
-                    // Optimized layout for 128x32 screen with 6x10 font
                     let lines_to_display = if lines.len() > 3 { 2 } else { 3 };
                     for (i, line) in lines
                         .iter()
@@ -195,7 +263,6 @@ fn main() -> ! {
                         .take(lines_to_display)
                         .enumerate()
                     {
-                        // y=8 for first line, then +10 for each subsequent line
                         let y = 8 + (i as i32 * 10);
                         draw_text!(
                             display,
@@ -206,19 +273,16 @@ fn main() -> ! {
                         );
                     }
 
-                    // Show scroll indicator if there are more than 3 lines
                     if lines.len() > 3 {
-                        let indicator = "...";
                         draw_text!(
                             display,
-                            indicator,
+                            "...",
                             Point::new(110, 28),
                             text_style,
                             "Failed to draw scroll indicator"
                         );
                     }
 
-                    // Show instruction only if we have 2 lines or less
                     if lines.len() <= 2 {
                         draw_text!(
                             display,
@@ -230,7 +294,6 @@ fn main() -> ! {
                     }
                 }
 
-                // Flush with retry logic
                 flush_display!(display, delay, "quote display");
             }
 
@@ -241,7 +304,6 @@ fn main() -> ! {
                     continue;
                 }
 
-                // Display "COUNTDOWN" label - centered for 128x32 screen
                 draw_text!(
                     display,
                     "COUNTDOWN",
@@ -250,7 +312,6 @@ fn main() -> ! {
                     "Failed to draw countdown label"
                 );
 
-                // Format and display the countdown time
                 let countdown_string = util::format_time(gadget.countdown_seconds, false);
                 draw_text!(
                     display,
@@ -260,12 +321,9 @@ fn main() -> ! {
                     "Failed to draw countdown time"
                 );
 
-                // Flush with retry logic
                 flush_display!(display, delay, "countdown display");
 
-                // Check if countdown finished
                 if gadget.countdown_seconds == 0 {
-                    // Could add a beep or notification here
                 }
             }
 
@@ -286,10 +344,41 @@ fn main() -> ! {
 
                 flush_display!(display, delay, "price loading display");
 
-                // Basic version uses simulation because the HTTP client is HTTP-only
-                // and Binance requires HTTPS/TLS.
-                delay.delay_millis(800);
-                gadget.simulate_price_fetch();
+                // ── Real fetch (network feature) vs simulation ──
+                #[cfg(feature = "network")]
+                {
+                    let fetched = if let Some(ref mut stack) = network_stack {
+                        if stack.is_network_ready() {
+                            match fetch_price(stack, gadget.current_asset) {
+                                Ok(price) => {
+                                    let formatted =
+                                        blink::price::format_price(gadget.current_asset, price);
+                                    gadget.handle_event(Event::PriceReceived(formatted));
+                                    true
+                                }
+                                Err(e) => {
+                                    info!("Price fetch failed: {:?}, using simulation", e);
+                                    false
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !fetched {
+                        delay.delay_millis(800);
+                        gadget.simulate_price_fetch();
+                    }
+                }
+
+                #[cfg(not(feature = "network"))]
+                {
+                    delay.delay_millis(800);
+                    gadget.simulate_price_fetch();
+                }
             }
 
             State::DisplayingPrice => {
@@ -299,7 +388,6 @@ fn main() -> ! {
                     continue;
                 }
 
-                // Asset label at the top
                 draw_text!(
                     display,
                     gadget.current_asset.display_name(),
@@ -308,7 +396,6 @@ fn main() -> ! {
                     "Failed to draw asset label"
                 );
 
-                // Price or fallback text
                 let price_text: &str = gadget
                     .current_price
                     .as_deref()
@@ -323,9 +410,6 @@ fn main() -> ! {
 
                 flush_display!(display, delay, "price display");
 
-                // Auto-cycle asset every 5 seconds while in price mode.
-                // Use an offset from the simulated button pulse so both events
-                // never fire in the same loop iteration.
                 if counter % 50 == 25 {
                     info!("Auto-cycling asset");
                     gadget.handle_event(Event::AssetTick);
@@ -333,8 +417,6 @@ fn main() -> ! {
             }
         }
 
-        delay.delay_millis(100); // Small delay for button debouncing
+        delay.delay_millis(100);
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/v0.23.1/examples/src/bin
 }

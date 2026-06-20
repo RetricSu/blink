@@ -20,6 +20,18 @@ jobs:
           components: rust-src
       - run: cargo test
 
+  network-check:
+    name: Network feature compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+          targets: riscv32imc-unknown-none-elf
+      - run: cargo build --target riscv32imc-unknown-none-elf --features network
+
   qemu-smoke:
     name: QEMU smoke test (ESP32-C3)
     runs-on: ubuntu-latest

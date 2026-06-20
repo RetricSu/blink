@@ -1,141 +1,265 @@
-//! WiFi connection module for ESP32-C3.
+//! WiFi + network stack module for ESP32-C3.
 //!
-//! Provides initialization and management of WiFi connections using `esp-wifi`.
-//! After connecting, exposes the network stack for use by higher-level modules
-//! like the HTTP client.
+//! Provides WiFi connection, DHCP IP configuration, DNS resolution, and TCP
+//! socket management using `esp-wifi` 0.13 and `smoltcp` 0.12.
 //!
-//! # Dependencies
+//! # Architecture
 //!
-//! Designed for `esp-wifi` 0.13.x and `esp-hal` 0.23.x on ESP32-C3.
-//! Minor API adjustments may be needed for other versions.
+//! Unlike the previous implementation which used the removed `WifiStack`
+//! helper, this module manually drives a `smoltcp::iface::Interface` backed
+//! by a `WifiDevice` (which implements `smoltcp::phy::Device`).
 //!
-//! # Example
+//! The [`NetworkStack`] struct owns:
+//! - A `WifiController` for WiFi connection management
+//! - A `WifiDevice` as the smoltcp physical-layer device
+//! - A `smoltcp::iface::Interface` for the IP stack
+//! - A `smoltcp::iface::SocketSet` holding DHCP, DNS, and TCP sockets
 //!
-//! ```ignore
-//! use blink::wifi::WifiManager;
-//!
-//! let peripherals = esp_hal::init(config);
-//! let clocks = esp_hal::clock::CpuClock::max();
-//! let mut wifi = WifiManager::init(peripherals, &clocks).unwrap();
-//! wifi.connect("MyAP", "password123").unwrap();
-//! // Ready for HTTP requests via blink::http
-//! ```
+//! Call [`NetworkStack::poll`] regularly in the main loop to process packets
+//! and maintain the connection.
 
 #[cfg(target_arch = "riscv32")]
 mod inner {
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::Ordering;
 
-    use esp_hal::clock::Clocks;
     use esp_hal::rng::Rng;
     use esp_hal::timer::timg::TimerGroup;
-    use esp_wifi::wifi::{ClientConfiguration, Configuration, WifiController, WifiDevice};
-    use esp_wifi::wifi_interface::WifiStack;
-    use esp_wifi::{initialize, EspWifiInitFor};
+    use esp_wifi::wifi::{
+        ClientConfiguration, Configuration, WifiController, WifiDevice, WifiStaDevice,
+    };
+    use esp_wifi::{wifi, EspWifiController};
     use heapless::String as HString;
-
-    use smoltcp::iface::{Config as IfaceConfig, Interface, SocketSet};
+    use portable_atomic::AtomicBool;
+    use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet, SocketStorage};
+    use managed::ManagedSlice;
+    use smoltcp::socket::dhcpv4::{Socket as Dhcpv4Socket, Event as DhcpEvent};
+    use smoltcp::socket::dns;
+    use smoltcp::socket::tcp;
     use smoltcp::time::Instant;
-    use smoltcp::wire::{EthernetAddress, HardwareAddress};
+    use smoltcp::wire::{
+        EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address,
+    };
 
-    /// Errors that can occur during WiFi operations.
+    /// Errors that can occur during WiFi/network operations.
     #[derive(Debug, Clone, PartialEq)]
     pub enum WifiError {
-        /// Failed to initialize the WiFi hardware/stack.
         InitFailed,
-        /// Failed to connect to the access point (wrong credentials, out of range, etc.).
         ConnectionFailed,
-        /// The WiFi connection was lost unexpectedly.
         Disconnected,
-        /// Invalid configuration (e.g., SSID too long for the buffer).
         ConfigError,
+        NotReady,
+        DnsFailed,
+        TcpFailed,
     }
 
-    /// Holds WiFi state accessible by other modules (HTTP client, etc.).
-    pub struct WifiResources<'d> {
-        /// The smoltcp network stack for TCP/UDP socket operations.
-        pub stack: WifiStack<'d>,
-    }
+    /// Static storage for smoltcp sockets (DHCP + DNS + TCP).
+    static mut SOCKET_STORAGE: [SocketStorage<'static>; 8] =
+        [const { SocketStorage::EMPTY }; 8];
 
-    /// Manages WiFi connection lifecycle for the ESP32-C3.
+    /// Static storage for DNS query slots.
+    static mut DNS_QUERIES: [Option<dns::DnsQuery>; 2] = [const { None }; 2];
+
+    /// Static storage for the TCP socket buffers.
+    static mut TCP_RX_BUF: [u8; 16384] = [0; 16384];
+    static mut TCP_TX_BUF: [u8; 4096] = [0; 4096];
+
+    /// Returns the current time as a `smoltcp::time::Instant`.
     ///
-    /// Initializes the hardware, connects to access points, and provides
-    /// access to the network stack for data transmission.
-    pub struct WifiManager<'d> {
-        controller: WifiController<'d>,
-        resources: WifiResources<'d>,
-        connected: bool,
+    /// Uses the RISC-V `mcycle` CSR. The ESP32-C3 runs at 160 MHz when
+    /// `CpuClock::max()` is selected (as `main.rs` does).
+    fn current_instant() -> Instant {
+        let cycles: u32;
+        unsafe {
+            core::arch::asm!("csrr {0}, mcycle", out(reg) cycles);
+        }
+        Instant::from_micros((cycles / 160) as i64)
     }
 
-    impl<'d> WifiManager<'d> {
-        /// Initialize WiFi hardware and the smoltcp network stack.
+    /// Manages the full WiFi + smoltcp network stack for ESP32-C3.
+    ///
+    /// Owns the WiFi controller, network interface, and socket set.
+    /// Call [`poll`](Self::poll) regularly to drive the stack.
+    pub struct NetworkStack<'d> {
+        controller: WifiController<'d>,
+        device: WifiDevice<'d, WifiStaDevice>,
+        iface: Interface,
+        sockets: SocketSet<'static>,
+        dhcp_handle: SocketHandle,
+        dns_handle: Option<SocketHandle>,
+        ip_address: Option<Ipv4Address>,
+        dns_server: Option<IpAddress>,
+        connected: bool,
+        network_ready: bool,
+    }
+
+    /// Guard that provides `embedded_io` access to a TCP socket.
+    ///
+    /// Borrows the `Interface`, `WifiDevice`, and `SocketSet` from a
+    /// [`NetworkStack`] for the lifetime of the guard.  While this guard
+    /// exists the `NetworkStack` cannot be accessed — the guard handles
+    /// polling internally.
+    pub struct TcpIo<'a, 'd> {
+        iface: &'a mut Interface,
+        device: &'a mut WifiDevice<'d, WifiStaDevice>,
+        sockets: &'a mut SocketSet<'static>,
+        handle: SocketHandle,
+    }
+
+    /// I/O error for the TCP bridge.
+    #[derive(Debug)]
+    pub struct TcpIoError;
+
+    impl core::fmt::Display for TcpIoError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "TCP I/O error")
+        }
+    }
+
+    impl core::error::Error for TcpIoError {}
+
+    impl embedded_io::Error for TcpIoError {
+        fn kind(&self) -> embedded_io::ErrorKind {
+            embedded_io::ErrorKind::Other
+        }
+    }
+
+    impl<'a, 'd> embedded_io::ErrorType for TcpIo<'a, 'd> {
+        type Error = TcpIoError;
+    }
+
+    impl<'a, 'd> embedded_io::Read for TcpIo<'a, 'd> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            loop {
+                let now = current_instant();
+                self.iface.poll(now, self.device, self.sockets);
+                let sock = self.sockets.get_mut::<tcp::Socket>(self.handle);
+                if !sock.may_recv() {
+                    return Ok(0); // peer closed or not connected
+                }
+                if sock.can_recv() {
+                    match sock.recv_slice(buf) {
+                        Ok(0) => continue,
+                        Ok(n) => return Ok(n),
+                        Err(tcp::RecvError::InvalidState) => continue,
+                        Err(_) => return Err(TcpIoError),
+                    }
+                }
+            }
+        }
+    }
+
+    impl<'a, 'd> embedded_io::Write for TcpIo<'a, 'd> {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let mut total = 0;
+            while total < buf.len() {
+                let now = current_instant();
+                self.iface.poll(now, self.device, self.sockets);
+                let sock = self.sockets.get_mut::<tcp::Socket>(self.handle);
+                if !sock.may_send() {
+                    return Err(TcpIoError);
+                }
+                if sock.can_send() {
+                    match sock.send_slice(&buf[total..]) {
+                        Ok(0) => continue,
+                        Ok(n) => total += n,
+                        Err(tcp::SendError::InvalidState) => continue,
+                    }
+                }
+            }
+            Ok(total)
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Static storage for the esp-wifi controller. It must outlive the
+    /// `WifiDevice` and `WifiController` which borrow from it.
+    static mut ESP_WIFI_INIT: Option<EspWifiController<'static>> = None;
+
+    impl<'d> NetworkStack<'d> {
+        /// Initialize the WiFi hardware and smoltcp network stack.
         ///
-        /// This consumes the ESP32-C3 `Peripherals` to take ownership of the
-        /// RADIO, RNG, and TIMG0 hardware blocks. Returns a `WifiManager` that
-        /// is ready for connection.
+        /// Takes only the peripherals needed for WiFi (TIMG0, RNG, RADIO_CLK,
+        /// WIFI) so the caller can retain I2C/GPIO for other uses.
         pub fn init(
-            peripherals: esp_hal::peripherals::Peripherals,
-            clocks: &Clocks<'_>,
+            timg0_per: esp_hal::peripherals::TIMG0,
+            rng_per: esp_hal::peripherals::RNG,
+            radio_clk: esp_hal::peripherals::RADIO_CLK,
+            wifi_per: esp_hal::peripherals::WIFI,
         ) -> Result<Self, WifiError> {
-            // The socket set lives in a static mut buffer. Creating a second
-            // `WifiManager` would produce a second `&mut` to that buffer,
-            // which is undefined behavior. Guard against double initialization.
             static INITED: AtomicBool = AtomicBool::new(false);
             if INITED.swap(true, Ordering::SeqCst) {
                 return Err(WifiError::InitFailed);
             }
 
             // ── esp-wifi initialization ──────────────────────────
-            let timg0 = TimerGroup::new(peripherals.TIMG0, clocks);
-            let rng = Rng::new(peripherals.RNG);
-            let radio_clk = peripherals.RADIO_CLK;
+            let timg0 = TimerGroup::new(timg0_per);
+            let rng = Rng::new(rng_per);
 
-            let init = initialize(EspWifiInitFor::Wifi, timg0.timer0, rng, radio_clk, clocks)
+            let init = esp_wifi::init(timg0.timer0, rng, radio_clk)
                 .map_err(|_| {
                     INITED.store(false, Ordering::SeqCst);
                     WifiError::InitFailed
                 })?;
 
-            // The RADIO peripheral is split into WiFi and BLE halves.
-            // We only need the WiFi half.
-            let (wifi_antenna, _ble) = peripherals.RADIO.split();
-
-            let (wifi_device, controller) = esp_wifi::wifi::new_with_mode(init, wifi_antenna)
-                .map_err(|_| {
-                    INITED.store(false, Ordering::SeqCst);
-                    WifiError::InitFailed
-                })?;
-
-            // ── smoltcp network stack ────────────────────────────
-            let iface_config =
-                IfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress::default()));
-
-            // We use a static buffer for the socket set — in no_std there is no
-            // global allocator, so a Vec cannot grow.
-            static mut SOCKET_STORAGE: [Option<smoltcp::iface::SocketStorage<'static>>; 4] =
-                [const { None }; 4];
-            let socket_set = SocketSet::new(unsafe { &mut SOCKET_STORAGE[..] });
-
-            // Clock function: esp-wifi uses this to timestamp packets.
-            // The cycle counter runs at the CPU frequency.
-            let cpu_mhz = clocks.cpu_clock.to_Hz() / 1_000_000;
-            let now = || -> Instant {
-                let cycles = riscv::register::mcycle::read64();
-                Instant::from_micros((cycles / cpu_mhz) as i64)
+            // Store the EspWifiController in a static so it lives for the
+            // entire program. The lifetime in EspWifiController<'d> is phantom
+            // (PhantomData<&'d ()>), so transmuting to 'static is sound.
+            let init_ref: &'static EspWifiController<'static> = unsafe {
+                let ptr = core::ptr::addr_of_mut!(ESP_WIFI_INIT);
+                ESP_WIFI_INIT = Some(core::mem::transmute::<
+                    EspWifiController<'_>,
+                    EspWifiController<'static>,
+                >(init));
+                (*ptr).as_ref().unwrap()
             };
 
-            let stack = WifiStack::new(iface_config, wifi_device, socket_set, now);
+            // ── WiFi device + controller ─────────────────────────
+            let (mut device, controller) =
+                wifi::new_with_mode(init_ref, wifi_per, WifiStaDevice).map_err(|_| {
+                    INITED.store(false, Ordering::SeqCst);
+                    WifiError::InitFailed
+                })?;
+
+            // ── smoltcp interface ────────────────────────────────
+            let mac = device.mac_address();
+            let hw_addr =
+                HardwareAddress::Ethernet(EthernetAddress::from_bytes(&mac));
+            let config = IfaceConfig::new(hw_addr);
+            let now = current_instant();
+            let iface = Interface::new(config, &mut device, now);
+
+            // ── Socket set with DHCP ─────────────────────────────
+            let mut sockets =
+                SocketSet::new(ManagedSlice::Borrowed(unsafe { &mut SOCKET_STORAGE[..] }));
+            let dhcp = Dhcpv4Socket::new();
+            let dhcp_handle = sockets.add(dhcp);
 
             Ok(Self {
                 controller,
-                resources: WifiResources { stack },
+                device,
+                iface,
+                sockets,
+                dhcp_handle,
+                dns_handle: None,
+                ip_address: None,
+                dns_server: None,
                 connected: false,
+                network_ready: false,
             })
         }
 
         /// Connect to a WiFi access point (WPA2-Personal).
         ///
-        /// This is a blocking call — it will not return until the connection
-        /// succeeds or fails. For async operation, use the controller directly.
+        /// Blocking call — returns once the WiFi link is up.
         pub fn connect(&mut self, ssid: &str, password: &str) -> Result<(), WifiError> {
             if ssid.len() > 32 || password.len() > 64 {
                 return Err(WifiError::ConfigError);
@@ -145,24 +269,20 @@ mod inner {
             ssid_h.push_str(ssid).map_err(|_| WifiError::ConfigError)?;
 
             let mut pwd_h: HString<64> = HString::new();
-            pwd_h
-                .push_str(password)
-                .map_err(|_| WifiError::ConfigError)?;
+            pwd_h.push_str(password).map_err(|_| WifiError::ConfigError)?;
 
-            let mut client_cfg = ClientConfiguration::default();
-            client_cfg.ssid = ssid_h;
-            client_cfg.password = pwd_h;
-
-            let conf = Configuration::Client(client_cfg);
+            let client_cfg = ClientConfiguration {
+                ssid: ssid_h,
+                password: pwd_h,
+                ..Default::default()
+            };
 
             self.controller
-                .set_configuration(&conf)
+                .set_configuration(&Configuration::Client(client_cfg))
                 .map_err(|_| WifiError::ConnectionFailed)?;
-
             self.controller
                 .start()
                 .map_err(|_| WifiError::ConnectionFailed)?;
-
             self.controller
                 .connect()
                 .map_err(|_| WifiError::ConnectionFailed)?;
@@ -171,18 +291,75 @@ mod inner {
             Ok(())
         }
 
-        /// Disconnect from the current access point and stop WiFi.
-        pub fn disconnect(&mut self) -> Result<(), WifiError> {
-            self.controller
-                .disconnect()
-                .map_err(|_| WifiError::Disconnected)?;
-            // Mark disconnected as soon as the controller reports it; if stop()
-            // fails afterwards we still reflect the disconnected state.
-            self.connected = false;
-            self.controller
-                .stop()
-                .map_err(|_| WifiError::Disconnected)?;
-            Ok(())
+        /// Drive the network stack — call regularly in the main loop.
+        ///
+        /// Polls the smoltcp interface and processes DHCP events (IP
+        /// address assignment, DNS server discovery).
+        pub fn poll(&mut self) {
+            let now = current_instant();
+            self.iface.poll(now, &mut self.device, &mut self.sockets);
+            self.handle_dhcp();
+        }
+
+        /// Process DHCP events and update interface configuration.
+        fn handle_dhcp(&mut self) {
+            // Extract DHCP event data without holding borrows on sockets.
+            let event = {
+                let dhcp =
+                    self.sockets.get_mut::<Dhcpv4Socket>(self.dhcp_handle);
+                match dhcp.poll() {
+                    Some(DhcpEvent::Configured(config)) => {
+                        let dns = config.dns_servers.first().copied();
+                        Some((true, Some(config.address), config.router, dns))
+                    }
+                    Some(DhcpEvent::Deconfigured) => Some((false, None, None, None)),
+                    None => None,
+                }
+            };
+
+            if let Some((configured, address, router, dns)) = event {
+                if configured {
+                    if let Some(cidr) = address {
+                        self.ip_address = Some(cidr.address());
+                        self.iface.update_ip_addrs(|addrs| {
+                            // Replace any existing IPv4 address.
+                            addrs.clear();
+                            addrs.push(IpCidr::Ipv4(cidr)).ok();
+                        });
+                    }
+                    if let Some(router) = router {
+                        self.iface
+                            .routes_mut()
+                            .add_default_ipv4_route(router)
+                            .ok();
+                    }
+                    if let Some(dns) = dns {
+                        self.dns_server = Some(IpAddress::Ipv4(dns));
+                        if self.dns_handle.is_none() {
+                            let servers = [IpAddress::Ipv4(dns)];
+                            let dns_socket = dns::Socket::new(
+                                &servers,
+                                ManagedSlice::Borrowed(unsafe { &mut DNS_QUERIES[..] }),
+                            );
+                            self.dns_handle = Some(self.sockets.add(dns_socket));
+                        }
+                    }
+                    self.network_ready = self.ip_address.is_some();
+                } else {
+                    // Deconfigured — lost IP
+                    self.ip_address = None;
+                    self.dns_server = None;
+                    self.network_ready = false;
+                    if let Some(handle) = self.dns_handle.take() {
+                        self.sockets.remove(handle);
+                    }
+                }
+            }
+        }
+
+        /// Returns `true` when WiFi is associated and DHCP has provided an IP.
+        pub fn is_network_ready(&self) -> bool {
+            self.network_ready
         }
 
         /// Returns `true` when the WiFi link is up.
@@ -190,17 +367,117 @@ mod inner {
             self.connected && self.controller.is_connected().unwrap_or(false)
         }
 
-        /// Get mutable access to WiFi resources (network stack, etc.).
+        /// Resolve a hostname to an IP address via DNS.
         ///
-        /// Pass this to the HTTP client or other networking modules.
-        pub fn resources(&mut self) -> &mut WifiResources<'d> {
-            &mut self.resources
+        /// Blocking — polls the interface until the query completes or times
+        /// out. Requires DHCP to have completed (DNS server must be known).
+        pub fn resolve_dns(&mut self, hostname: &str) -> Result<IpAddress, WifiError> {
+            let dns_handle = self.dns_handle.ok_or(WifiError::NotReady)?;
+
+            // Start the DNS query — smoltcp 0.12 start_query takes
+            // (Context, name, query_type). The DNS server is already
+            // configured on the socket.
+            let query_handle = {
+                let mut cx = self.iface.context();
+                let dns_sock =
+                    self.sockets.get_mut::<dns::Socket>(dns_handle);
+                dns_sock
+                    .start_query(&mut cx, hostname, smoltcp::wire::DnsQueryType::A)
+                    .map_err(|_| WifiError::DnsFailed)?
+            };
+
+            // Poll until the query completes or times out.
+            for _ in 0..5000 {
+                let now = current_instant();
+                self.iface.poll(now, &mut self.device, &mut self.sockets);
+
+                let dns_sock =
+                    self.sockets.get_mut::<dns::Socket>(dns_handle);
+                match dns_sock.get_query_result(query_handle) {
+                    Ok(addrs) => {
+                        let addr = addrs.first().copied().ok_or(WifiError::DnsFailed)?;
+                        return Ok(addr);
+                    }
+                    Err(dns::GetQueryResultError::Pending) => continue,
+                    Err(_) => return Err(WifiError::DnsFailed),
+                }
+            }
+            Err(WifiError::DnsFailed)
         }
 
-        /// Drive the network stack — call this regularly in the main loop
-        /// to process incoming/outgoing packets and maintain the connection.
-        pub fn poll(&mut self) {
-            self.resources.stack.work();
+        /// Open a TCP connection to `addr:port`.
+        ///
+        /// Returns a `SocketHandle` that can be used with [`tcp_io`](Self::tcp_io)
+        /// and [`tcp_close`](Self::tcp_close). Uses static internal buffers, so
+        /// only one TCP connection can be active at a time.
+        pub fn tcp_connect(
+            &mut self,
+            addr: IpAddress,
+            port: u16,
+        ) -> Result<SocketHandle, WifiError> {
+            if !self.is_network_ready() {
+                return Err(WifiError::NotReady);
+            }
+
+            let socket = tcp::Socket::new(
+                tcp::SocketBuffer::new(unsafe { &mut TCP_RX_BUF[..] }),
+                tcp::SocketBuffer::new(unsafe { &mut TCP_TX_BUF[..] }),
+            );
+            let handle = self.sockets.add(socket);
+
+            // Connect — smoltcp 0.12 takes (cx, remote, local).
+            let local_port = 4096u16; // arbitrary ephemeral port
+            {
+                let mut cx = self.iface.context();
+                let sock =
+                    self.sockets.get_mut::<tcp::Socket>(handle);
+                let remote = smoltcp::wire::IpEndpoint::new(addr, port);
+                let local = smoltcp::wire::IpListenEndpoint {
+                    addr: None,
+                    port: local_port,
+                };
+                sock.connect(&mut cx, remote, local)
+                    .map_err(|_| {
+                        self.sockets.remove(handle);
+                        WifiError::TcpFailed
+                    })?;
+            }
+
+            // Wait for the TCP handshake to complete.
+            for _ in 0..5000 {
+                let now = current_instant();
+                self.iface.poll(now, &mut self.device, &mut self.sockets);
+                let sock =
+                    self.sockets.get_mut::<tcp::Socket>(handle);
+                if !sock.is_open() {
+                    self.sockets.remove(handle);
+                    return Err(WifiError::TcpFailed);
+                }
+                if sock.may_send() {
+                    return Ok(handle);
+                }
+            }
+
+            self.sockets.remove(handle);
+            Err(WifiError::TcpFailed)
+        }
+
+        /// Create an `embedded_io` bridge for a TCP socket.
+        ///
+        /// While the returned guard is alive, the `NetworkStack` cannot be
+        /// accessed — the guard handles interface polling internally.
+        pub fn tcp_io(&mut self, handle: SocketHandle) -> TcpIo<'_, 'd> {
+            TcpIo {
+                iface: &mut self.iface,
+                device: &mut self.device,
+                sockets: &mut self.sockets,
+                handle,
+            }
+        }
+
+        /// Close and remove a TCP socket.
+        pub fn tcp_close(&mut self, handle: SocketHandle) {
+            self.sockets.remove(handle);
         }
     }
 }
@@ -213,6 +490,7 @@ pub use inner::*;
 #[cfg(not(target_arch = "riscv32"))]
 mod inner {
     use core::marker::PhantomData;
+    use smoltcp::wire::IpAddress;
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum WifiError {
@@ -220,20 +498,18 @@ mod inner {
         ConnectionFailed,
         Disconnected,
         ConfigError,
+        NotReady,
+        DnsFailed,
+        TcpFailed,
     }
 
-    /// Stub WiFi resources struct for host-side compilation.
-    pub struct WifiResources<'d> {
+    /// Stub network stack for host-side compilation.
+    pub struct NetworkStack<'d> {
         _phantom: PhantomData<&'d ()>,
     }
 
-    /// Stub WiFi manager for host-side compilation.
-    pub struct WifiManager<'d> {
-        resources: WifiResources<'d>,
-    }
-
-    impl<'d> WifiManager<'d> {
-        pub fn init(_peripherals: (), _clocks: &()) -> Result<Self, WifiError> {
+    impl<'d> NetworkStack<'d> {
+        pub fn init() -> Result<Self, WifiError> {
             Err(WifiError::InitFailed)
         }
 
@@ -241,19 +517,19 @@ mod inner {
             Err(WifiError::ConnectionFailed)
         }
 
-        pub fn disconnect(&mut self) -> Result<(), WifiError> {
-            Err(WifiError::Disconnected)
-        }
+        pub fn poll(&mut self) {}
 
         pub fn is_connected(&self) -> bool {
             false
         }
 
-        pub fn resources(&mut self) -> &mut WifiResources<'d> {
-            &mut self.resources
+        pub fn is_network_ready(&self) -> bool {
+            false
         }
 
-        pub fn poll(&mut self) {}
+        pub fn resolve_dns(&mut self, _hostname: &str) -> Result<IpAddress, WifiError> {
+            Err(WifiError::DnsFailed)
+        }
     }
 }
 
