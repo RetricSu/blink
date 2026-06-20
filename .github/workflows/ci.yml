@@ -35,8 +35,10 @@ jobs:
 
       - name: Install QEMU with ESP32-C3 support
         run: |
-          wget -q https://github.com/espressif/qemu/releases/download/esp-develop-9.1.0-20250122/qemu-riscv32-softmmu-esp-develop-9.1.0-20250122-x86_64-linux-gnu.tar.xz
-          tar xf qemu-riscv32-softmmu-*.tar.xz
+          QEMU_TAG=$(curl -fsSL https://github.com/espressif/qemu/releases/latest | grep -oE '/espressif/qemu/releases/expanded_assets/[^"]+' | sed 's#.*/expanded_assets/##' | head -1)
+          QEMU_ASSET=$(curl -fsSL "https://github.com/espressif/qemu/releases/expanded_assets/${QEMU_TAG}" | grep -oE 'qemu-riscv32-softmmu-[^" ]+x86_64-linux-gnu\.tar\.xz' | head -1)
+          curl -fsSL -o "${QEMU_ASSET}" "https://github.com/espressif/qemu/releases/download/${QEMU_TAG}/${QEMU_ASSET}"
+          tar xf "${QEMU_ASSET}"
           echo "$PWD/qemu/bin" >> "$GITHUB_PATH"
           qemu-system-riscv32 --version
 
