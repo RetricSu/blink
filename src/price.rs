@@ -5,8 +5,6 @@
 //! standard ticker response, and provides a deterministic simulation fallback
 //! because the current HTTP client is HTTP-only while Binance requires HTTPS.
 
-#![cfg_attr(not(test), no_std)]
-
 use core::fmt::Write;
 use heapless::String as HString;
 
