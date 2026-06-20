@@ -40,7 +40,7 @@ jobs:
 
       - name: Install QEMU with ESP32-C3 support
         run: |
-          QEMU_ASSET_PATTERN='qemu-riscv32-softmmu-esp[-_]develop[-_][0-9]+(\.[0-9]+){2}[-_][0-9]{8}-x86_64-linux-gnu\.tar\.xz'
+          QEMU_ASSET_PATTERN='qemu-riscv32-softmmu-esp(_develop_[0-9]+(\.[0-9]+){2}_[0-9]{8}|-develop-[0-9]+(\.[0-9]+){2}-[0-9]{8})-x86_64-linux-gnu\.tar\.xz'
           CURL_OPTS=(--connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2)
           if ! command -v jq >/dev/null 2>&1; then
             echo "Missing required tool: jq"
@@ -87,15 +87,20 @@ jobs:
             echo "Refusing to extract archive with unsafe paths: ${QEMU_ASSET}"
             exit 1
           fi
+          # In tar verbose listings, l marks symbolic links and h marks hard links.
           if tar -tvf "${QEMU_ASSET}" | grep -Eq '^[lh]'; then
             echo "Refusing to extract archive with link entries: ${QEMU_ASSET}"
             exit 1
           fi
-          QEMU_EXTRACT_DIR=$(mktemp -d)
+          QEMU_TEMP_BASE="${RUNNER_TEMP:-/tmp}"
+          QEMU_TEMP_BASE="${QEMU_TEMP_BASE%/}"
+          QEMU_EXTRACT_PARENT=$(mktemp -d "${QEMU_TEMP_BASE}/qemu-extract.XXXXXX")
+          QEMU_EXTRACT_DIR="${QEMU_EXTRACT_PARENT}/root"
+          mkdir "${QEMU_EXTRACT_DIR}"
           cleanup_qemu_extract_dir() {
-            if [ -n "${QEMU_EXTRACT_DIR:-}" ] && [ -d "${QEMU_EXTRACT_DIR}" ] && [ "${QEMU_EXTRACT_DIR#/tmp/}" != "${QEMU_EXTRACT_DIR}" ]; then
-              rm -rf "${QEMU_EXTRACT_DIR}"
-            fi
+            case "${QEMU_EXTRACT_PARENT:-}" in
+              "${QEMU_TEMP_BASE}/qemu-extract."*) rm -rf "${QEMU_EXTRACT_PARENT}" ;;
+            esac
           }
           trap cleanup_qemu_extract_dir EXIT
           tar xf "${QEMU_ASSET}" -C "${QEMU_EXTRACT_DIR}" --no-same-owner --no-same-permissions
