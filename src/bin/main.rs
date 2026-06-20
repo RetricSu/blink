@@ -309,10 +309,10 @@ fn main() -> ! {
                 );
 
                 // Price or fallback text
-                let price_text: heapless::String<128> = gadget
+                let price_text: &str = gadget
                     .current_price
-                    .clone()
-                    .unwrap_or_else(|| heapless::String::from("--"));
+                    .as_deref()
+                    .unwrap_or("--");
                 draw_text!(
                     display,
                     &price_text,

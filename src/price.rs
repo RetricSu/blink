@@ -44,6 +44,9 @@ pub const ALL_ASSETS: [Asset; 3] = [Asset::Btc, Asset::Ckb, Asset::Gold];
 /// Output looks like `"BTC: 65432.10"` and fits on a single 6x10 line.
 pub fn format_price(asset: Asset, price: f64) -> HString<128> {
     let mut s = HString::new();
+    // Buffer capacity (128) is reserved for the formatted price string;
+    // the asset label is at most 4 bytes and the price is rendered with
+    // two decimal places, so truncation is not expected for typical values.
     let _ = write!(&mut s, "{}: {:.2}", asset.display_name(), price);
     s
 }
@@ -64,15 +67,21 @@ pub fn parse_price_json(body: &str) -> Option<f64> {
     body[start..start + end].parse().ok()
 }
 
+/// Simulated prices used while the device HTTP client is HTTP-only.
+/// These values are deterministic stand-ins for real Binance ticker prices.
+const SIMULATED_BTC_PRICE: f64 = 65432.10;
+const SIMULATED_CKB_PRICE: f64 = 0.0123;
+const SIMULATED_GOLD_PRICE: f64 = 2345.67;
+
 /// Deterministic simulated price for the given asset.
 ///
 /// Used in the basic version because the device's HTTP client cannot speak
 /// HTTPS. Once TLS support is added, replace this with a real network call.
 pub fn simulate_fetch_price(asset: Asset) -> f64 {
     match asset {
-        Asset::Btc => 65432.10,
-        Asset::Ckb => 0.0123,
-        Asset::Gold => 2345.67,
+        Asset::Btc => SIMULATED_BTC_PRICE,
+        Asset::Ckb => SIMULATED_CKB_PRICE,
+        Asset::Gold => SIMULATED_GOLD_PRICE,
     }
 }
 

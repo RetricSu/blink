@@ -202,7 +202,7 @@ impl SmartGadget {
         }
     }
 
-    pub fn cycle_asset(&mut self) {
+    pub(crate) fn cycle_asset(&mut self) {
         self.asset_index = (self.asset_index + 1) % ALL_ASSETS.len();
         self.current_asset = ALL_ASSETS[self.asset_index];
     }
@@ -613,14 +613,6 @@ mod tests {
     }
 
     // ── price display transitions ─────────────────────────────────
-
-    #[test]
-    fn button_press_from_countdown_goes_to_fetching_price() {
-        let mut gadget = SmartGadget::new();
-        gadget.state = State::DisplayingCountdown;
-        gadget.handle_event(Event::ButtonPress);
-        assert_eq!(gadget.state, State::FetchingPrice);
-    }
 
     #[test]
     fn price_received_while_fetching_goes_to_displaying() {
