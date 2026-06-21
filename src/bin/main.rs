@@ -3,7 +3,10 @@
 
 use blink::{util, Event, SmartGadget, State};
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyle},
+    mono_font::{
+        ascii::{FONT_10X20, FONT_5X7, FONT_6X10},
+        MonoTextStyle,
+    },
     pixelcolor::BinaryColor,
     prelude::*,
     text::Text,
@@ -128,6 +131,8 @@ fn main() -> ! {
     }
 
     let text_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let label_style = MonoTextStyle::new(&FONT_5X7, BinaryColor::On);
+    let price_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let delay = Delay::new();
 
     // ── Connect WiFi (when network is available) ───────────────
@@ -351,8 +356,7 @@ fn main() -> ! {
                         if stack.is_network_ready() {
                             match fetch_price(stack, gadget.current_asset) {
                                 Ok(price) => {
-                                    let formatted =
-                                        blink::price::format_price(gadget.current_asset, price);
+                                    let formatted = blink::price::format_price(price);
                                     gadget.handle_event(Event::PriceReceived(formatted));
                                     true
                                 }
@@ -388,23 +392,24 @@ fn main() -> ! {
                     continue;
                 }
 
+                // Small asset label tucked in the top-left corner.
                 draw_text!(
                     display,
                     gadget.current_asset.display_name(),
-                    Point::new(50, 8),
-                    text_style,
+                    Point::new(2, 6),
+                    label_style,
                     "Failed to draw asset label"
                 );
 
-                let price_text: &str = gadget
-                    .current_price
-                    .as_deref()
-                    .unwrap_or("--");
+                let price_text: &str = gadget.current_price.as_deref().unwrap_or("--");
+                // FONT_10X20 glyphs are 10px wide with no spacing.
+                let price_width = price_text.len() as i32 * 10;
+                let price_x = (128 - price_width) / 2;
                 draw_text!(
                     display,
-                    &price_text,
-                    Point::new(10, 24),
-                    text_style,
+                    price_text,
+                    Point::new(price_x, 26),
+                    price_style,
                     "Failed to draw price"
                 );
 

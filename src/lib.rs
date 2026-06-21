@@ -207,7 +207,7 @@ impl SmartGadget {
 
     pub fn simulate_price_fetch(&mut self) {
         let price = simulate_fetch_price(self.current_asset);
-        let formatted = format_price(self.current_asset, price);
+        let formatted = format_price(price);
         self.handle_event(Event::PriceReceived(formatted));
     }
 }
@@ -623,7 +623,7 @@ mod tests {
     fn price_received_while_fetching_goes_to_displaying() {
         let mut gadget = SmartGadget::new();
         gadget.state = State::FetchingPrice;
-        let price = HString::<128>::try_from("BTC: 65432.10").unwrap();
+        let price = HString::<128>::try_from("65432.10").unwrap();
         gadget.handle_event(Event::PriceReceived(price.clone()));
         assert_eq!(gadget.state, State::DisplayingPrice);
         assert_eq!(gadget.current_price, Some(price));
@@ -651,7 +651,7 @@ mod tests {
     fn asset_tick_cycles_asset_and_fetches() {
         let mut gadget = SmartGadget::new();
         gadget.state = State::DisplayingPrice;
-        gadget.current_price = Some(HString::<128>::try_from("BTC: 65432.10").unwrap());
+        gadget.current_price = Some(HString::<128>::try_from("65432.10").unwrap());
         gadget.handle_event(Event::AssetTick);
         assert_eq!(gadget.current_asset, Asset::Ckb);
         assert!(gadget.current_price.is_none());
