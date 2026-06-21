@@ -8,12 +8,12 @@ A simple hardware gadget built with ESP32-C3 that displays time, quotes, and fea
 - **Quote Display**: Displays inspirational quotes
 - **Pomodoro Timer**: 25-minute countdown session timer
 - **Button Interaction**: Single button to cycle through different modes
-- **OLED Display**: 128x64 pixel SSD1306 display for clear text output
+- **OLED Display**: 128x32 pixel SSD1306 display for clear text output
 
 ## Hardware Requirements
 
 - **ESP32-C3** development board
-- **SSD1306 OLED Display** (128x64 pixels, I2C interface)
+- **SSD1306 OLED Display** (128x32 pixels, I2C interface, 0.91 inch)
 - **Push Button** for mode switching
 - **Breadboard and Jumper Wires** for connections
 - **USB-C Cable** for programming and power

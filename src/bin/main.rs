@@ -31,6 +31,21 @@ const WIFI_SSID: &str = "YOUR_SSID";
 #[cfg(feature = "network")]
 const WIFI_PASSWORD: &str = "YOUR_PASSWORD";
 
+/// Display dimensions (must match the `DisplaySize128x32` used below).
+const SCREEN_WIDTH: i32 = 128;
+const SCREEN_HEIGHT: i32 = 32;
+
+/// Dimensions of the large price font (`FONT_10X20`).
+const PRICE_FONT_WIDTH: i32 = 10;
+const PRICE_FONT_HEIGHT: i32 = 20;
+
+/// Top-left position of the small asset label.
+const LABEL_X: i32 = 2;
+const LABEL_Y: i32 = 6;
+
+/// Top-left Y position of the large price text so it fits entirely on screen.
+const PRICE_Y: i32 = SCREEN_HEIGHT - PRICE_FONT_HEIGHT;
+
 fn init_heap() {
     const HEAP_SIZE: usize = 64 * 1024;
     static mut HEAP: core::mem::MaybeUninit<[u8; HEAP_SIZE]> = core::mem::MaybeUninit::uninit();
@@ -396,19 +411,18 @@ fn main() -> ! {
                 draw_text!(
                     display,
                     gadget.current_asset.display_name(),
-                    Point::new(2, 6),
+                    Point::new(LABEL_X, LABEL_Y),
                     label_style,
                     "Failed to draw asset label"
                 );
 
                 let price_text: &str = gadget.current_price.as_deref().unwrap_or("--");
-                // FONT_10X20 glyphs are 10px wide with no spacing.
-                let price_width = price_text.len() as i32 * 10;
-                let price_x = (128 - price_width) / 2;
+                let price_width = price_text.len() as i32 * PRICE_FONT_WIDTH;
+                let price_x = (SCREEN_WIDTH - price_width) / 2;
                 draw_text!(
                     display,
                     price_text,
-                    Point::new(price_x, 26),
+                    Point::new(price_x, PRICE_Y),
                     price_style,
                     "Failed to draw price"
                 );
