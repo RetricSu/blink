@@ -2,12 +2,10 @@
 
 use heapless::String as HString;
 
-// Hardware abstraction modules
 pub mod hardware;
 pub mod renderer;
 pub mod util;
 
-// 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {
     DisplayingQuote,
@@ -22,7 +20,6 @@ pub enum Event {
     CountdownFinished,
 }
 
-// 2. Create a struct for your gadget
 pub struct SmartGadget {
     pub state: State,
     pub current_quote: HString<128>,
@@ -33,7 +30,6 @@ pub struct SmartGadget {
     pub quote_line_offset: usize, // For scrolling through long quotes
 }
 
-// 3. Implement a method to handle events
 impl Default for SmartGadget {
     fn default() -> Self {
         Self::new()
@@ -65,23 +61,17 @@ impl SmartGadget {
 
     pub fn handle_event(&mut self, event: Event) {
         match (&self.state, event) {
-            // If we're showing a quote and the button is pressed...
             (State::DisplayingQuote, Event::ButtonPress) => {
-                self.switch_to_next_quote(); // Switch to next quote
-                                             // ACTION: Display the new quote
+                self.switch_to_next_quote();
             }
 
-            // If we want to start countdown...
             (State::DisplayingQuote, Event::StartCountdown) => {
                 self.start_countdown(30); // Start 30-second countdown
                 self.state = State::DisplayingCountdown;
-                // ACTION: Switch to countdown mode
             }
 
-            // If we're in countdown and button is pressed...
             (State::DisplayingCountdown, Event::ButtonPress) => {
                 self.state = State::DisplayingQuote;
-                // ACTION: Go back to quote mode
             }
 
             // Countdown tick event
@@ -96,7 +86,6 @@ impl SmartGadget {
             // Countdown finished
             (State::DisplayingCountdown, Event::CountdownFinished) => {
                 self.state = State::DisplayingQuote;
-                // ACTION: Countdown finished, return to quote
             }
 
             // Catch-all for unhandled combinations
