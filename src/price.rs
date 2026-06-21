@@ -50,12 +50,13 @@ pub const ALL_ASSETS: [Asset; 3] = [Asset::Btc, Asset::Ckb, Asset::Gold];
 
 /// Format a price for the 128x32 OLED.
 ///
-/// Output looks like `"BTC: 65432.10"` and fits on a single 6x10 line.
-pub fn format_price(asset: Asset, price: f64) -> HString<128> {
+/// Output is the numeric price rounded to two decimals, e.g. `"65432.10"`.
+/// The asset label is drawn separately so the price can use a larger font.
+pub fn format_price(price: f64) -> HString<128> {
     let mut s = HString::new();
     // The buffer (128 bytes) is far larger than the formatted output
-    // (max 4-byte label + ": " + two-decimal price), so write cannot fail.
-    write!(&mut s, "{}: {:.2}", asset.display_name(), price).unwrap();
+    // (max two-decimal price), so write cannot fail.
+    write!(&mut s, "{:.2}", price).unwrap();
     s
 }
 
@@ -319,8 +320,8 @@ mod tests {
 
     #[test]
     fn format_price_rounds_to_two_decimals() {
-        let s = format_price(Asset::Btc, 65432.1234);
-        assert_eq!(s.as_str(), "BTC: 65432.12");
+        let s = format_price(65432.1234);
+        assert_eq!(s.as_str(), "65432.12");
     }
 
     #[test]

@@ -3,7 +3,10 @@
 
 use blink::{util, Event, SmartGadget, State};
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyle},
+    mono_font::{
+        ascii::{FONT_10X20, FONT_5X7, FONT_6X10},
+        MonoTextStyle,
+    },
     pixelcolor::BinaryColor,
     prelude::*,
     text::Text,
@@ -27,6 +30,21 @@ use blink::wifi::NetworkStack;
 const WIFI_SSID: &str = "YOUR_SSID";
 #[cfg(feature = "network")]
 const WIFI_PASSWORD: &str = "YOUR_PASSWORD";
+
+/// Display dimensions (must match the `DisplaySize128x32` used below).
+const SCREEN_WIDTH: i32 = 128;
+const SCREEN_HEIGHT: i32 = 32;
+
+/// Dimensions of the large price font (`FONT_10X20`).
+const PRICE_FONT_WIDTH: i32 = 10;
+const PRICE_FONT_HEIGHT: i32 = 20;
+
+/// Top-left position of the small asset label.
+const LABEL_X: i32 = 2;
+const LABEL_Y: i32 = 6;
+
+/// Top-left Y position of the large price text so it fits entirely on screen.
+const PRICE_Y: i32 = SCREEN_HEIGHT - PRICE_FONT_HEIGHT;
 
 fn init_heap() {
     const HEAP_SIZE: usize = 64 * 1024;
@@ -128,6 +146,8 @@ fn main() -> ! {
     }
 
     let text_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let label_style = MonoTextStyle::new(&FONT_5X7, BinaryColor::On);
+    let price_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let delay = Delay::new();
 
     // ── Connect WiFi (when network is available) ───────────────
@@ -351,8 +371,7 @@ fn main() -> ! {
                         if stack.is_network_ready() {
                             match fetch_price(stack, gadget.current_asset) {
                                 Ok(price) => {
-                                    let formatted =
-                                        blink::price::format_price(gadget.current_asset, price);
+                                    let formatted = blink::price::format_price(price);
                                     gadget.handle_event(Event::PriceReceived(formatted));
                                     true
                                 }
@@ -388,23 +407,23 @@ fn main() -> ! {
                     continue;
                 }
 
+                // Small asset label tucked in the top-left corner.
                 draw_text!(
                     display,
                     gadget.current_asset.display_name(),
-                    Point::new(50, 8),
-                    text_style,
+                    Point::new(LABEL_X, LABEL_Y),
+                    label_style,
                     "Failed to draw asset label"
                 );
 
-                let price_text: &str = gadget
-                    .current_price
-                    .as_deref()
-                    .unwrap_or("--");
+                let price_text: &str = gadget.current_price.as_deref().unwrap_or("--");
+                let price_width = price_text.len() as i32 * PRICE_FONT_WIDTH;
+                let price_x = (SCREEN_WIDTH - price_width) / 2;
                 draw_text!(
                     display,
-                    &price_text,
-                    Point::new(10, 24),
-                    text_style,
+                    price_text,
+                    Point::new(price_x, PRICE_Y),
+                    price_style,
                     "Failed to draw price"
                 );
 
