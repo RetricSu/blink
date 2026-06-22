@@ -24,6 +24,7 @@ mod inner {
 
     use esp_hal::rng::Rng;
     use esp_hal::timer::timg::TimerGroup;
+    use log::{debug, info};
     use esp_wifi::wifi::{
         ClientConfiguration, Configuration, WifiController, WifiDevice, WifiStaDevice,
     };
@@ -81,7 +82,7 @@ mod inner {
     /// the two reads. The ESP32-C3 runs at 160 MHz when `CpuClock::max()` is
     /// selected (as `main.rs` does).
     #[allow(clippy::unused_assignments, unused_assignments, unused_variables)]
-    fn current_instant() -> Instant {
+    pub(crate) fn current_instant() -> Instant {
         let lo: u32;
         let hi: u32;
         let hi2: u32;
@@ -302,7 +303,8 @@ mod inner {
 
         /// Connect to a WiFi access point (WPA2-Personal).
         ///
-        /// Blocking call — returns once the WiFi link is up.
+        /// Blocking call — returns once the WiFi link is up (the controller
+        /// reports `is_connected`) or the association timeout fires.
         pub fn connect(&mut self, ssid: &str, password: &str) -> Result<(), WifiError> {
             if ssid.len() > 32 || password.len() > 64 {
                 return Err(WifiError::ConfigError);
@@ -320,6 +322,8 @@ mod inner {
                 ..Default::default()
             };
 
+            info!("WiFi: starting connection to SSID: {}", ssid);
+
             self.controller
                 .set_configuration(&Configuration::Client(client_cfg))
                 .map_err(|_| WifiError::ConnectionFailed)?;
@@ -330,8 +334,39 @@ mod inner {
                 .connect()
                 .map_err(|_| WifiError::ConnectionFailed)?;
 
-            self.connected = true;
-            Ok(())
+            // Wait for the 802.11 association to complete.  Without this the
+            // caller has no feedback when the AP is unreachable or the password
+            // is wrong.
+            let start = current_instant();
+            let timeout = smoltcp::time::Duration::from_millis(15000);
+            let mut logged = false;
+            loop {
+                let now = current_instant();
+                if now - start > timeout {
+                    info!("WiFi: association timeout");
+                    return Err(WifiError::ConnectionFailed);
+                }
+
+                self.iface.poll(now, &mut self.device, &mut self.sockets);
+
+                match self.controller.is_connected() {
+                    Ok(true) => {
+                        info!("WiFi: associated");
+                        self.connected = true;
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        if !logged {
+                            info!("WiFi: associating...");
+                            logged = true;
+                        }
+                    }
+                    Err(_) => {
+                        info!("WiFi: controller error while associating");
+                        return Err(WifiError::ConnectionFailed);
+                    }
+                }
+            }
         }
 
         /// Drive the network stack — call regularly in the main loop.
@@ -363,7 +398,9 @@ mod inner {
             if let Some((configured, address, router, dns)) = event {
                 if configured {
                     if let Some(cidr) = address {
-                        self.ip_address = Some(cidr.address());
+                        let ip = cidr.address();
+                        self.ip_address = Some(ip);
+                        info!("DHCP: IP acquired: {}", ip);
                         self.iface.update_ip_addrs(|addrs| {
                             // Replace any existing IPv4 address.
                             addrs.clear();
@@ -390,6 +427,7 @@ mod inner {
                     self.network_ready = self.ip_address.is_some();
                 } else {
                     // Deconfigured — lost IP
+                    info!("DHCP: deconfigured");
                     self.ip_address = None;
                     self.dns_server = None;
                     self.network_ready = false;
@@ -416,6 +454,7 @@ mod inner {
         /// out. Requires DHCP to have completed (DNS server must be known).
         pub fn resolve_dns(&mut self, hostname: &str) -> Result<IpAddress, WifiError> {
             let dns_handle = self.dns_handle.ok_or(WifiError::NotReady)?;
+            info!("DNS: resolving {}", hostname);
 
             // Start the DNS query — smoltcp 0.12 start_query takes
             // (Context, name, query_type). The DNS server is already
@@ -437,6 +476,7 @@ mod inner {
             loop {
                 let now = current_instant();
                 if now - start > timeout {
+                    info!("DNS: timeout for {}", hostname);
                     return Err(WifiError::DnsFailed);
                 }
                 self.iface.poll(now, &mut self.device, &mut self.sockets);
@@ -446,10 +486,14 @@ mod inner {
                 match dns_sock.get_query_result(query_handle) {
                     Ok(addrs) => {
                         let addr = addrs.first().copied().ok_or(WifiError::DnsFailed)?;
+                        debug!("DNS: resolved {} -> {:?}", hostname, addr);
                         return Ok(addr);
                     }
                     Err(dns::GetQueryResultError::Pending) => continue,
-                    Err(_) => return Err(WifiError::DnsFailed),
+                    Err(_) => {
+                        info!("DNS: failed for {}", hostname);
+                        return Err(WifiError::DnsFailed);
+                    }
                 }
             }
         }
@@ -465,8 +509,11 @@ mod inner {
             port: u16,
         ) -> Result<SocketHandle, WifiError> {
             if !self.is_network_ready() {
+                info!("TCP: network not ready");
                 return Err(WifiError::NotReady);
             }
+
+            info!("TCP: connecting to {}:{}", addr, port);
 
             // The TCP socket buffers are `static mut`; lending them to more
             // than one socket at a time would create aliased mutable
@@ -493,6 +540,7 @@ mod inner {
                     port: local_port,
                 };
                 if sock.connect(&mut cx, remote, local).is_err() {
+                    info!("TCP: connect failed to {}:{}", addr, port);
                     self.sockets.remove(handle);
                     TCP_IN_USE.store(false, Ordering::SeqCst);
                     return Err(WifiError::TcpFailed);
@@ -507,6 +555,7 @@ mod inner {
             loop {
                 let now = current_instant();
                 if now - start > timeout {
+                    info!("TCP: connect timeout to {}:{}", addr, port);
                     self.sockets.remove(handle);
                     TCP_IN_USE.store(false, Ordering::SeqCst);
                     return Err(WifiError::TcpFailed);
@@ -515,11 +564,13 @@ mod inner {
                 let sock =
                     self.sockets.get_mut::<tcp::Socket>(handle);
                 if !sock.is_open() {
+                    info!("TCP: connection reset to {}:{}", addr, port);
                     self.sockets.remove(handle);
                     TCP_IN_USE.store(false, Ordering::SeqCst);
                     return Err(WifiError::TcpFailed);
                 }
                 if sock.may_send() {
+                    debug!("TCP: connected to {}:{}", addr, port);
                     return Ok(handle);
                 }
             }

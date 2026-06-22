@@ -161,7 +161,7 @@ fn main() -> ! {
             flush_display!(display, delay, "wifi connecting");
 
             match stack.connect(WIFI_SSID, WIFI_PASSWORD) {
-                Ok(_) => info!("WiFi connected, waiting for DHCP..."),
+                Ok(_) => info!("WiFi associated, waiting for DHCP..."),
                 Err(e) => info!("WiFi connect failed: {:?}, using simulation", e),
             }
 
