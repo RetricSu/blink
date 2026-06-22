@@ -22,6 +22,7 @@
 mod inner {
     use core::sync::atomic::Ordering;
 
+    use esp_hal::delay::Delay;
     use esp_hal::rng::Rng;
     use esp_hal::timer::timg::TimerGroup;
     use log::{debug, info};
@@ -340,6 +341,7 @@ mod inner {
             let start = current_instant();
             let timeout = smoltcp::time::Duration::from_millis(15000);
             let mut logged = false;
+            let delay = Delay::new();
             loop {
                 let now = current_instant();
                 if now - start > timeout {
@@ -366,6 +368,8 @@ mod inner {
                         return Err(WifiError::ConnectionFailed);
                     }
                 }
+
+                delay.delay_millis(10);
             }
         }
 

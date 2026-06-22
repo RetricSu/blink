@@ -295,7 +295,7 @@ pub fn fetch_price(
 
     if resp.status_code != 200 {
         info!(
-            "Price: received {} price, status {}",
+            "Price: failed to fetch {} price, status {}",
             asset.display_name(),
             resp.status_code
         );
