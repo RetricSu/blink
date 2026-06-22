@@ -36,6 +36,7 @@ pub enum HttpError {
     BodyTooLarge,
     DnsFailed,
     TlsFailed,
+    Timeout,
 }
 
 /// A parsed HTTP response.
@@ -111,10 +112,12 @@ pub fn parse_http_response(raw: &[u8], body_buf: &mut [u8]) -> Result<HttpRespon
 #[cfg(all(target_arch = "riscv32", feature = "network"))]
 mod inner {
     use super::{build_get_request, parse_http_response, HttpError, HttpResponse};
+    use crate::wifi::current_instant;
     use crate::wifi::NetworkStack;
     use embedded_tls::blocking::{TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
     use embedded_tls::Aes128GcmSha256;
     use esp_hal::rng::Rng;
+    use log::{debug, info};
     use rand_core::{CryptoRng, RngCore};
 
     /// Static buffers for TLS records (too large for the stack).
@@ -159,6 +162,17 @@ mod inner {
 
     impl CryptoRng for CryptoRngWrapper {}
 
+    /// Overall wall-clock budget for a single HTTPS GET (DNS + TCP + TLS +
+    /// send + read).  Slightly larger than the sum of the sub-stage timeouts so
+    /// a slow but valid server does not trip unnecessarily.
+    const REQUEST_TIMEOUT_MS: u64 = 20_000;
+
+    /// Convert an elapsed smoltcp duration to whole milliseconds for logging.
+    fn elapsed_ms(start: smoltcp::time::Instant, now: smoltcp::time::Instant) -> u64 {
+        let dur = now - start;
+        dur.total_millis() as u64
+    }
+
     /// A minimal, blocking HTTPS client for ESP32-C3.
     ///
     /// Uses `embedded-tls` 0.19 (TLS 1.3) over a smoltcp TCP socket provided
@@ -185,15 +199,40 @@ mod inner {
             path: &str,
             resp_body: &mut [u8],
         ) -> Result<HttpResponse, HttpError> {
+            let overall_start = current_instant();
+            let timeout = smoltcp::time::Duration::from_millis(REQUEST_TIMEOUT_MS);
+
+            macro_rules! check_timeout {
+                ($stage:literal) => {{
+                    let now = current_instant();
+                    if now - overall_start > timeout {
+                        info!(
+                            "HTTP: timeout after {} ms at stage {}",
+                            elapsed_ms(overall_start, now),
+                            $stage
+                        );
+                        return Err(HttpError::Timeout);
+                    }
+                    now
+                }};
+            }
+
             // 1. DNS resolve
             let ip = stack
                 .resolve_dns(host)
                 .map_err(|_| HttpError::DnsFailed)?;
+            let now = check_timeout!("dns");
+            info!("HTTP: DNS resolved in {} ms", elapsed_ms(overall_start, now));
 
             // 2. TCP connect to port 443
             let handle = stack
                 .tcp_connect(ip, 443)
                 .map_err(|_| HttpError::ConnectionFailed)?;
+            let now = check_timeout!("tcp_connect");
+            info!(
+                "HTTP: TCP connected in {} ms",
+                elapsed_ms(overall_start, now)
+            );
 
             // 3. Create embedded-io bridge + TLS connection
             let io = stack.tcp_io(handle);
@@ -205,28 +244,43 @@ mod inner {
             );
 
             // 4. TLS handshake (no certificate verification — see module docs)
+            info!("HTTP: starting TLS handshake with {}", host);
             let config = TlsConfig::new().with_server_name(host);
+            debug!("HTTP: TLS config created for {}", host);
             let rng = CryptoRngWrapper::new();
             let context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(rng));
 
             tls.open(context).map_err(|_| HttpError::TlsFailed)?;
+            let now = check_timeout!("tls_handshake");
+            info!(
+                "HTTP: TLS handshake in {} ms",
+                elapsed_ms(overall_start, now)
+            );
 
             // 5. Send HTTP request
+            info!("HTTP: sending GET {} to {}", path, host);
             let request = build_get_request(host, path)?;
             tls.write(request.as_bytes())
                 .map_err(|_| HttpError::SendFailed)?;
             tls.flush().ok();
+            let now = check_timeout!("send");
+            info!("HTTP: request sent in {} ms", elapsed_ms(overall_start, now));
 
             // 6. Read response — read until EOF (Connection: close) or buffer full
+            info!("HTTP: reading response...");
             let mut raw_buf: [u8; 2048] = [0; 2048];
             let mut total = 0usize;
             loop {
+                check_timeout!("recv");
                 if total >= raw_buf.len() {
                     break; // buffer full
                 }
                 let n = match tls.read(&mut raw_buf[total..]) {
                     Ok(0) => break, // EOF — server closed connection
-                    Ok(n) => n,
+                    Ok(n) => {
+                        debug!("HTTP: read {} bytes", n);
+                        n
+                    }
                     Err(_) => {
                         // If we already have some data, try to parse it
                         if total > 0 {
@@ -237,6 +291,13 @@ mod inner {
                 };
                 total += n;
             }
+
+            let now = current_instant();
+            info!(
+                "HTTP: response received in {} ms ({} bytes)",
+                elapsed_ms(overall_start, now),
+                total
+            );
 
             // 7. Drop TLS connection (releases borrow on stack)
             drop(tls);
@@ -249,7 +310,21 @@ mod inner {
             }
 
             // 9. Parse HTTP response
-            parse_http_response(&raw_buf[..total], resp_body)
+            let result = parse_http_response(&raw_buf[..total], resp_body);
+            let now = current_instant();
+            match result {
+                Ok(ref resp) => info!(
+                    "HTTP: total request time {} ms, status {}",
+                    elapsed_ms(overall_start, now),
+                    resp.status_code
+                ),
+                Err(ref e) => info!(
+                    "HTTP: failed after {} ms: {:?}",
+                    elapsed_ms(overall_start, now),
+                    e
+                ),
+            }
+            result
         }
     }
 

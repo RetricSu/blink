@@ -277,18 +277,36 @@ pub fn fetch_price(
     asset: Asset,
 ) -> Result<f64, FetchError> {
     use crate::http::HttpClient;
+    use log::info;
+
+    info!("Price: fetching {} price", asset.display_name());
 
     let path = binance_price_path(asset.binance_symbol());
     let mut client = HttpClient::new();
     let mut body_buf = [0u8; 256];
 
-    let resp = client
-        .get_https(stack, "api.binance.com", &path, &mut body_buf)
-        .map_err(FetchError::Http)?;
+    let resp = match client.get_https(stack, "api.binance.com", &path, &mut body_buf) {
+        Ok(r) => r,
+        Err(e) => {
+            info!("Price: failed to fetch {} price: {:?}", asset.display_name(), e);
+            return Err(FetchError::Http(e));
+        }
+    };
 
     if resp.status_code != 200 {
+        info!(
+            "Price: failed to fetch {} price, status {}",
+            asset.display_name(),
+            resp.status_code
+        );
         return Err(FetchError::BadStatus(resp.status_code));
     }
+
+    info!(
+        "Price: received {} price, status {}",
+        asset.display_name(),
+        resp.status_code
+    );
 
     let body = core::str::from_utf8(&body_buf[..resp.body_len])
         .map_err(|_| FetchError::ParseError)?;
