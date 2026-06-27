@@ -3,12 +3,14 @@
 
 use blink::{util, Event, SmartGadget, State};
 use embedded_graphics::{
+    draw_target::DrawTarget,
     mono_font::{
         ascii::{FONT_10X20, FONT_5X7, FONT_6X10},
         MonoTextStyle,
     },
     pixelcolor::BinaryColor,
     prelude::*,
+    primitives::{Line, PrimitiveStyle},
     text::Text,
 };
 use esp_backtrace as _;
@@ -27,9 +29,15 @@ use blink::price::fetch_price;
 use blink::wifi::NetworkStack;
 
 #[cfg(feature = "network")]
-const WIFI_SSID: &str = "YOUR_SSID";
+const WIFI_SSID: &str = match option_env!("BLINK_WIFI_SSID") {
+    Some(ssid) => ssid,
+    None => "YOUR_SSID",
+};
 #[cfg(feature = "network")]
-const WIFI_PASSWORD: &str = "YOUR_PASSWORD";
+const WIFI_PASSWORD: &str = match option_env!("BLINK_WIFI_PASSWORD") {
+    Some(password) => password,
+    None => "YOUR_PASSWORD",
+};
 
 /// Display dimensions (must match the `DisplaySize128x32` used below).
 const SCREEN_WIDTH: i32 = 128;
@@ -37,14 +45,64 @@ const SCREEN_HEIGHT: i32 = 32;
 
 /// Dimensions of the large price font (`FONT_10X20`).
 const PRICE_FONT_WIDTH: i32 = 10;
-const PRICE_FONT_HEIGHT: i32 = 20;
 
 /// Top-left position of the small asset label.
 const LABEL_X: i32 = 2;
-const LABEL_Y: i32 = 6;
+const LABEL_Y: i32 = 7;
 
-/// Top-left Y position of the large price text so it fits entirely on screen.
-const PRICE_Y: i32 = SCREEN_HEIGHT - PRICE_FONT_HEIGHT;
+/// Top-right position of the status label.
+const STATUS_TEXT: &str = "LIVE";
+const STATUS_X: i32 = SCREEN_WIDTH - (STATUS_TEXT.len() as i32 * 5) - 2;
+const STATUS_Y: i32 = LABEL_Y;
+
+/// Horizontal rule separating the status line from the price.
+const HEADER_RULE_Y: i32 = 10;
+
+/// Baseline Y position for the large price text.
+const PRICE_Y: i32 = SCREEN_HEIGHT - 1;
+
+fn draw_price_screen<D>(
+    display: &mut D,
+    asset_label: &str,
+    price_text: &str,
+    label_style: MonoTextStyle<'_, BinaryColor>,
+    price_style: MonoTextStyle<'_, BinaryColor>,
+) where
+    D: DrawTarget<Color = BinaryColor>,
+    D::Error: core::fmt::Debug,
+{
+    if let Err(e) = display.clear(BinaryColor::Off) {
+        info!("Failed to clear display: {:?}", e);
+        return;
+    }
+
+    if let Err(e) = Text::new(asset_label, Point::new(LABEL_X, LABEL_Y), label_style).draw(display)
+    {
+        info!("Failed to draw asset label: {:?}", e);
+    }
+
+    if let Err(e) =
+        Text::new(STATUS_TEXT, Point::new(STATUS_X, STATUS_Y), label_style).draw(display)
+    {
+        info!("Failed to draw status label: {:?}", e);
+    }
+
+    if let Err(e) = Line::new(
+        Point::new(2, HEADER_RULE_Y),
+        Point::new(SCREEN_WIDTH - 3, HEADER_RULE_Y),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+    .draw(display)
+    {
+        info!("Failed to draw header rule: {:?}", e);
+    }
+
+    let price_width = price_text.len() as i32 * PRICE_FONT_WIDTH;
+    let price_x = (SCREEN_WIDTH - price_width) / 2;
+    if let Err(e) = Text::new(price_text, Point::new(price_x, PRICE_Y), price_style).draw(display) {
+        info!("Failed to draw price: {:?}", e);
+    }
+}
 
 fn init_heap() {
     const HEAP_SIZE: usize = 64 * 1024;
@@ -157,7 +215,13 @@ fn main() -> ! {
             if let Err(e) = display.clear(BinaryColor::Off) {
                 info!("Failed to clear display: {:?}", e);
             }
-            draw_text!(display, "Connecting WiFi", Point::new(0, 16), text_style, "Failed to draw");
+            draw_text!(
+                display,
+                "Connecting WiFi",
+                Point::new(0, 16),
+                text_style,
+                "Failed to draw"
+            );
             flush_display!(display, delay, "wifi connecting");
 
             match stack.connect(WIFI_SSID, WIFI_PASSWORD) {
@@ -183,11 +247,11 @@ fn main() -> ! {
     // ── State machine init ─────────────────────────────────────
     let mut gadget = SmartGadget::new();
 
-    gadget.handle_event(Event::ButtonPress);
-    gadget.simulate_quote_fetch();
+    gadget.state = State::FetchingPrice;
 
     let mut counter = 0;
     let mut seconds_elapsed = 0u32;
+    let mut price_dirty = true;
 
     loop {
         // Poll the network stack every iteration
@@ -199,11 +263,6 @@ fn main() -> ! {
         }
 
         counter += 1;
-        if counter % 50 == 0 {
-            info!("Simulating button press!");
-            gadget.handle_event(Event::ButtonPress);
-        }
-
         if counter % 10 == 0 {
             seconds_elapsed += 1;
             if gadget.state == State::DisplayingCountdown {
@@ -343,26 +402,11 @@ fn main() -> ! {
 
                 flush_display!(display, delay, "countdown display");
 
-                if gadget.countdown_seconds == 0 {
-                }
+                if gadget.countdown_seconds == 0 {}
             }
 
             State::FetchingPrice => {
                 info!("Fetching price for {:?}", gadget.current_asset);
-                if let Err(e) = display.clear(BinaryColor::Off) {
-                    info!("Failed to clear display: {:?}", e);
-                    continue;
-                }
-
-                draw_text!(
-                    display,
-                    "Loading price...",
-                    Point::new(10, 16),
-                    text_style,
-                    "Failed to draw text"
-                );
-
-                flush_display!(display, delay, "price loading display");
 
                 // ── Real fetch (network feature) vs simulation ──
                 #[cfg(feature = "network")]
@@ -371,7 +415,10 @@ fn main() -> ! {
                         if stack.is_network_ready() {
                             match fetch_price(stack, gadget.current_asset) {
                                 Ok(price) => {
-                                    let formatted = blink::price::format_price(price);
+                                    let formatted = blink::price::format_asset_price(
+                                        gadget.current_asset,
+                                        price,
+                                    );
                                     gadget.handle_event(Event::PriceReceived(formatted));
                                     true
                                 }
@@ -398,36 +445,25 @@ fn main() -> ! {
                     delay.delay_millis(800);
                     gadget.simulate_price_fetch();
                 }
+
+                price_dirty = true;
             }
 
             State::DisplayingPrice => {
-                info!("Displaying price: {:?}", gadget.current_price);
-                if let Err(e) = display.clear(BinaryColor::Off) {
-                    info!("Failed to clear display: {:?}", e);
-                    continue;
+                if price_dirty {
+                    info!("Displaying price: {:?}", gadget.current_price);
+                    let price_text: &str = gadget.current_price.as_deref().unwrap_or("--");
+                    draw_price_screen(
+                        &mut display,
+                        gadget.current_asset.display_name(),
+                        price_text,
+                        label_style,
+                        price_style,
+                    );
+
+                    flush_display!(display, delay, "price display");
+                    price_dirty = false;
                 }
-
-                // Small asset label tucked in the top-left corner.
-                draw_text!(
-                    display,
-                    gadget.current_asset.display_name(),
-                    Point::new(LABEL_X, LABEL_Y),
-                    label_style,
-                    "Failed to draw asset label"
-                );
-
-                let price_text: &str = gadget.current_price.as_deref().unwrap_or("--");
-                let price_width = price_text.len() as i32 * PRICE_FONT_WIDTH;
-                let price_x = (SCREEN_WIDTH - price_width) / 2;
-                draw_text!(
-                    display,
-                    price_text,
-                    Point::new(price_x, PRICE_Y),
-                    price_style,
-                    "Failed to draw price"
-                );
-
-                flush_display!(display, delay, "price display");
 
                 if counter % 50 == 25 {
                     info!("Auto-cycling asset");

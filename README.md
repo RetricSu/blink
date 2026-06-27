@@ -55,35 +55,37 @@ rustup target add riscv32imc-unknown-none-elf
 git clone <your-repo-url>
 cd blink
 
-# Build and flash to ESP32-C3
-cargo run
+# Build and flash the price ticker firmware to ESP32-C3
+BLINK_WIFI_SSID="your-ssid" BLINK_WIFI_PASSWORD="your-password" \
+  cargo run --release --target riscv32imc-unknown-none-elf --features network
 ```
 
 ### Manual Build
 ```bash
-# Build the project
-cargo build --release
+# Build the ESP32-C3 price ticker firmware
+BLINK_WIFI_SSID="your-ssid" BLINK_WIFI_PASSWORD="your-password" \
+  cargo build --release --target riscv32imc-unknown-none-elf --features network
 
-# Flash manually
-espflash flash --monitor target/riscv32imc-unknown-none-elf/release/blink
+# Flash manually. Replace the port with your board's serial device.
+espflash flash --monitor --port /dev/cu.usbmodem113101 target/riscv32imc-unknown-none-elf/release/blink
 ```
 
 ## Usage
 
-### Button Functions
-- **Single Click**: Cycle through display modes
-  - Time display
-  - Quote display  
-  - Timer mode
-- **Long Press**: Start/stop 25-minute countdown timer
-- **Double Click**: Reset timer
+The current firmware runs as a small price ticker. After WiFi connects, it
+cycles through BTC, CKB, and Gold prices, keeping the previous price visible
+until the next live quote has loaded.
 
-### Display Modes
+The 128x32 OLED uses a compact market-card layout:
 
-1. **Time Mode**: Shows current time in HH:MM format
-2. **Quote Mode**: Displays inspirational quotes with scrolling text
-3. **Timer Mode**: Shows countdown timer with progress bar
-4. **Price Mode**: Cycles through BTC, CKB, and Gold prices (basic version uses simulated prices)
+```text
+BTC                         LIVE
+────────────────────────────────
+        60120.01
+```
+
+WiFi credentials are provided at build time with `BLINK_WIFI_SSID` and
+`BLINK_WIFI_PASSWORD`; they are not stored in the repository.
 
 ## Project Structure
 
@@ -122,7 +124,7 @@ blink/
 The project includes serial output for debugging:
 ```bash
 # Monitor serial output
-cargo run -- --monitor
+espflash monitor --port /dev/cu.usbmodem113101
 ```
 
 Log levels can be controlled via the `ESP_LOG` environment variable.

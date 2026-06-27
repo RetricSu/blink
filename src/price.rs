@@ -7,6 +7,8 @@
 
 use core::fmt::Write;
 use heapless::String as HString;
+#[cfg(all(feature = "network", target_arch = "riscv32"))]
+use log::info;
 
 /// Assets shown on the price display mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +59,16 @@ pub fn format_price(price: f64) -> HString<128> {
     // The buffer (128 bytes) is far larger than the formatted output
     // (max two-decimal price), so write cannot fail.
     write!(&mut s, "{:.2}", price).unwrap();
+    s
+}
+
+/// Format a price with asset-specific precision for the 128x32 OLED.
+pub fn format_asset_price(asset: Asset, price: f64) -> HString<128> {
+    let mut s = HString::new();
+    match asset {
+        Asset::Ckb => write!(&mut s, "{:.4}", price).unwrap(),
+        Asset::Btc | Asset::Gold => write!(&mut s, "{:.2}", price).unwrap(),
+    }
     s
 }
 
@@ -266,6 +278,33 @@ pub enum FetchError {
     ParseError,
 }
 
+#[cfg(all(feature = "network", target_arch = "riscv32"))]
+#[derive(Clone, Copy)]
+struct BinanceEndpoint {
+    host: &'static str,
+    tls: bool,
+}
+
+#[cfg(all(feature = "network", target_arch = "riscv32"))]
+const BINANCE_API_ENDPOINTS: [BinanceEndpoint; 4] = [
+    BinanceEndpoint {
+        host: "data-api.binance.vision",
+        tls: false,
+    },
+    BinanceEndpoint {
+        host: "data-api.binance.vision",
+        tls: true,
+    },
+    BinanceEndpoint {
+        host: "api-gcp.binance.com",
+        tls: true,
+    },
+    BinanceEndpoint {
+        host: "api1.binance.com",
+        tls: true,
+    },
+];
+
 /// Fetch the live price of `asset` from the Binance HTTPS API.
 ///
 /// Requires a [`NetworkStack`](crate::wifi::NetworkStack) with WiFi connected
@@ -282,36 +321,70 @@ pub fn fetch_price(
     info!("Price: fetching {} price", asset.display_name());
 
     let path = binance_price_path(asset.binance_symbol());
-    let mut client = HttpClient::new();
-    let mut body_buf = [0u8; 256];
+    let mut last_error = FetchError::ParseError;
 
-    let resp = match client.get_https(stack, "api.binance.com", &path, &mut body_buf) {
-        Ok(r) => r,
-        Err(e) => {
-            info!("Price: failed to fetch {} price: {:?}", asset.display_name(), e);
-            return Err(FetchError::Http(e));
+    for endpoint in BINANCE_API_ENDPOINTS {
+        let scheme = if endpoint.tls { "https" } else { "http" };
+        info!("Price: fetching from {}://{}", scheme, endpoint.host);
+
+        let mut client = HttpClient::new();
+        let mut body_buf = [0u8; 256];
+        let result = if endpoint.tls {
+            client.get_https(stack, endpoint.host, &path, &mut body_buf)
+        } else {
+            client.get_http(stack, endpoint.host, &path, &mut body_buf)
+        };
+
+        let resp = match result {
+            Ok(resp) => resp,
+            Err(e) => {
+                info!(
+                    "Price: failed to fetch {} price from {}://{}: {:?}",
+                    asset.display_name(),
+                    scheme,
+                    endpoint.host,
+                    e
+                );
+                last_error = FetchError::Http(e);
+                continue;
+            }
+        };
+
+        if resp.status_code != 200 {
+            info!(
+                "Price: failed to fetch {} price from {}://{}, status {}",
+                asset.display_name(),
+                scheme,
+                endpoint.host,
+                resp.status_code
+            );
+            last_error = FetchError::BadStatus(resp.status_code);
+            continue;
         }
-    };
 
-    if resp.status_code != 200 {
         info!(
-            "Price: failed to fetch {} price, status {}",
+            "Price: received {} price from {}://{}, status {}",
             asset.display_name(),
+            scheme,
+            endpoint.host,
             resp.status_code
         );
-        return Err(FetchError::BadStatus(resp.status_code));
+
+        let body = match core::str::from_utf8(&body_buf[..resp.body_len]) {
+            Ok(body) => body,
+            Err(_) => {
+                last_error = FetchError::ParseError;
+                continue;
+            }
+        };
+
+        match parse_price_json(body) {
+            Some(price) => return Ok(price),
+            None => last_error = FetchError::ParseError,
+        }
     }
 
-    info!(
-        "Price: received {} price, status {}",
-        asset.display_name(),
-        resp.status_code
-    );
-
-    let body = core::str::from_utf8(&body_buf[..resp.body_len])
-        .map_err(|_| FetchError::ParseError)?;
-
-    parse_price_json(body).ok_or(FetchError::ParseError)
+    Err(last_error)
 }
 
 #[cfg(test)]
@@ -340,6 +413,12 @@ mod tests {
     fn format_price_rounds_to_two_decimals() {
         let s = format_price(65432.1234);
         assert_eq!(s.as_str(), "65432.12");
+    }
+
+    #[test]
+    fn format_asset_price_keeps_small_ckb_values_visible() {
+        let s = format_asset_price(Asset::Ckb, 0.0042);
+        assert_eq!(s.as_str(), "0.0042");
     }
 
     #[test]

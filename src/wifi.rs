@@ -25,22 +25,22 @@ mod inner {
     use esp_hal::delay::Delay;
     use esp_hal::rng::Rng;
     use esp_hal::timer::timg::TimerGroup;
-    use log::{debug, info};
     use esp_wifi::wifi::{
         ClientConfiguration, Configuration, WifiController, WifiDevice, WifiStaDevice,
     };
     use esp_wifi::{wifi, EspWifiController};
     use heapless::String as HString;
-    use portable_atomic::AtomicBool;
-    use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet, SocketStorage};
+    use log::{debug, info};
     use managed::ManagedSlice;
-    use smoltcp::socket::dhcpv4::{Socket as Dhcpv4Socket, Event as DhcpEvent};
+    use portable_atomic::AtomicBool;
+    use smoltcp::iface::{
+        Config as IfaceConfig, Interface, SocketHandle, SocketSet, SocketStorage,
+    };
+    use smoltcp::socket::dhcpv4::{Event as DhcpEvent, Socket as Dhcpv4Socket};
     use smoltcp::socket::dns;
     use smoltcp::socket::tcp;
     use smoltcp::time::Instant;
-    use smoltcp::wire::{
-        EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address,
-    };
+    use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 
     /// Errors that can occur during WiFi/network operations.
     #[derive(Debug, Clone, PartialEq)]
@@ -55,8 +55,7 @@ mod inner {
     }
 
     /// Static storage for smoltcp sockets (DHCP + DNS + TCP).
-    static mut SOCKET_STORAGE: [SocketStorage<'static>; 8] =
-        [const { SocketStorage::EMPTY }; 8];
+    static mut SOCKET_STORAGE: [SocketStorage<'static>; 8] = [const { SocketStorage::EMPTY }; 8];
 
     /// Static storage for DNS query slots.
     static mut DNS_QUERIES: [Option<dns::DnsQuery>; 2] = [const { None }; 2];
@@ -72,37 +71,9 @@ mod inner {
     /// most one TCP connection is active at a time.
     static TCP_IN_USE: AtomicBool = AtomicBool::new(false);
 
-    /// Returns the current time as a `smoltcp::time::Instant`.
-    ///
-    /// Uses the RISC-V 64-bit cycle counter. On RV32 the counter is split
-    /// across the `mcycle` (low) and `mcycleh` (high) CSRs; reading only
-    /// `mcycle` would wrap every ~26.8s at 160 MHz and break smoltcp's
-    /// internal timers (TCP retransmits, DHCP lease renewals). The carry
-    /// loop re-reads `mcycleh` before and after `mcycle` and retries if the
-    /// high word changed, handling the race where `mcycle` overflows between
-    /// the two reads. The ESP32-C3 runs at 160 MHz when `CpuClock::max()` is
-    /// selected (as `main.rs` does).
-    #[allow(clippy::unused_assignments, unused_assignments, unused_variables)]
     pub(crate) fn current_instant() -> Instant {
-        let lo: u32;
-        let hi: u32;
-        let hi2: u32;
-        unsafe {
-            core::arch::asm!(
-                "1: csrr {hi}, mcycleh
-                   csrr {lo}, mcycle
-                   csrr {hi2}, mcycleh
-                   bne {hi}, {hi2}, 1b",
-                hi = out(reg) hi,
-                lo = out(reg) lo,
-                hi2 = out(reg) hi2,
-                options(nostack, preserves_flags),
-            );
-        }
-        // `hi2` is read inside the asm by the `bne` but the compiler can't
-        // see that, hence the function-level allow above.
-        let cycles: u64 = ((hi as u64) << 32) | (lo as u64);
-        Instant::from_micros((cycles / 160) as i64)
+        let micros = esp_hal::time::now().duration_since_epoch().to_micros();
+        Instant::from_micros(micros as i64)
     }
 
     /// Manages the full WiFi + smoltcp network stack for ESP32-C3.
@@ -249,11 +220,10 @@ mod inner {
             let timg0 = TimerGroup::new(timg0_per);
             let rng = Rng::new(rng_per);
 
-            let init = esp_wifi::init(timg0.timer0, rng, radio_clk)
-                .map_err(|_| {
-                    INITED.store(false, Ordering::SeqCst);
-                    WifiError::InitFailed
-                })?;
+            let init = esp_wifi::init(timg0.timer0, rng, radio_clk).map_err(|_| {
+                INITED.store(false, Ordering::SeqCst);
+                WifiError::InitFailed
+            })?;
 
             // Store the EspWifiController in a static so it lives for the
             // entire program. The lifetime in EspWifiController<'d> is phantom
@@ -268,16 +238,15 @@ mod inner {
             };
 
             // ── WiFi device + controller ─────────────────────────
-            let (mut device, controller) =
-                wifi::new_with_mode(init_ref, wifi_per, WifiStaDevice).map_err(|_| {
-                    INITED.store(false, Ordering::SeqCst);
-                    WifiError::InitFailed
-                })?;
+            let (mut device, controller) = wifi::new_with_mode(init_ref, wifi_per, WifiStaDevice)
+                .map_err(|_| {
+                INITED.store(false, Ordering::SeqCst);
+                WifiError::InitFailed
+            })?;
 
             // ── smoltcp interface ────────────────────────────────
             let mac = device.mac_address();
-            let hw_addr =
-                HardwareAddress::Ethernet(EthernetAddress::from_bytes(&mac));
+            let hw_addr = HardwareAddress::Ethernet(EthernetAddress::from_bytes(&mac));
             let config = IfaceConfig::new(hw_addr);
             let now = current_instant();
             let iface = Interface::new(config, &mut device, now);
@@ -315,7 +284,9 @@ mod inner {
             ssid_h.push_str(ssid).map_err(|_| WifiError::ConfigError)?;
 
             let mut pwd_h: HString<64> = HString::new();
-            pwd_h.push_str(password).map_err(|_| WifiError::ConfigError)?;
+            pwd_h
+                .push_str(password)
+                .map_err(|_| WifiError::ConfigError)?;
 
             let client_cfg = ClientConfiguration {
                 ssid: ssid_h,
@@ -387,8 +358,7 @@ mod inner {
         fn handle_dhcp(&mut self) {
             // Extract DHCP event data without holding borrows on sockets.
             let event = {
-                let dhcp =
-                    self.sockets.get_mut::<Dhcpv4Socket>(self.dhcp_handle);
+                let dhcp = self.sockets.get_mut::<Dhcpv4Socket>(self.dhcp_handle);
                 match dhcp.poll() {
                     Some(DhcpEvent::Configured(config)) => {
                         let dns = config.dns_servers.first().copied();
@@ -412,10 +382,7 @@ mod inner {
                         });
                     }
                     if let Some(router) = router {
-                        self.iface
-                            .routes_mut()
-                            .add_default_ipv4_route(router)
-                            .ok();
+                        self.iface.routes_mut().add_default_ipv4_route(router).ok();
                     }
                     if let Some(dns) = dns {
                         self.dns_server = Some(IpAddress::Ipv4(dns));
@@ -465,8 +432,7 @@ mod inner {
             // configured on the socket.
             let query_handle = {
                 let mut cx = self.iface.context();
-                let dns_sock =
-                    self.sockets.get_mut::<dns::Socket>(dns_handle);
+                let dns_sock = self.sockets.get_mut::<dns::Socket>(dns_handle);
                 dns_sock
                     .start_query(&mut cx, hostname, smoltcp::wire::DnsQueryType::A)
                     .map_err(|_| WifiError::DnsFailed)?
@@ -485,8 +451,7 @@ mod inner {
                 }
                 self.iface.poll(now, &mut self.device, &mut self.sockets);
 
-                let dns_sock =
-                    self.sockets.get_mut::<dns::Socket>(dns_handle);
+                let dns_sock = self.sockets.get_mut::<dns::Socket>(dns_handle);
                 match dns_sock.get_query_result(query_handle) {
                     Ok(addrs) => {
                         let addr = addrs.first().copied().ok_or(WifiError::DnsFailed)?;
@@ -536,8 +501,7 @@ mod inner {
             let local_port = 4096u16; // arbitrary ephemeral port
             {
                 let mut cx = self.iface.context();
-                let sock =
-                    self.sockets.get_mut::<tcp::Socket>(handle);
+                let sock = self.sockets.get_mut::<tcp::Socket>(handle);
                 let remote = smoltcp::wire::IpEndpoint::new(addr, port);
                 let local = smoltcp::wire::IpListenEndpoint {
                     addr: None,
@@ -565,8 +529,7 @@ mod inner {
                     return Err(WifiError::TcpFailed);
                 }
                 self.iface.poll(now, &mut self.device, &mut self.sockets);
-                let sock =
-                    self.sockets.get_mut::<tcp::Socket>(handle);
+                let sock = self.sockets.get_mut::<tcp::Socket>(handle);
                 if !sock.is_open() {
                     info!("TCP: connection reset to {}:{}", addr, port);
                     self.sockets.remove(handle);
@@ -609,7 +572,6 @@ pub use inner::*;
 #[cfg(not(target_arch = "riscv32"))]
 mod inner {
     use core::marker::PhantomData;
-    use smoltcp::wire::IpAddress;
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum WifiError {
@@ -646,7 +608,7 @@ mod inner {
             false
         }
 
-        pub fn resolve_dns(&mut self, _hostname: &str) -> Result<IpAddress, WifiError> {
+        pub fn resolve_dns(&mut self, _hostname: &str) -> Result<(), WifiError> {
             Err(WifiError::DnsFailed)
         }
     }
