@@ -1,15 +1,15 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod http;
+pub mod price;
 #[cfg(feature = "network")]
 pub mod wifi;
-pub mod price;
 
 use core::fmt::Write;
 use heapless::String as HString;
 use heapless::Vec as HVec;
 use log::info;
-use price::{Asset, ALL_ASSETS, format_price, simulate_fetch_price};
+use price::{format_asset_price, simulate_fetch_price, Asset, ALL_ASSETS};
 
 // 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
@@ -207,7 +207,7 @@ impl SmartGadget {
 
     pub fn simulate_price_fetch(&mut self) {
         let price = simulate_fetch_price(self.current_asset);
-        let formatted = format_price(price);
+        let formatted = format_asset_price(self.current_asset, price);
         self.handle_event(Event::PriceReceived(formatted));
     }
 }
@@ -587,7 +587,8 @@ mod tests {
 
         // 3. Quote arrives → DisplayingQuote
         let quote =
-            HString::<128>::try_from("A journey of a thousand miles begins with a single step.").unwrap();
+            HString::<128>::try_from("A journey of a thousand miles begins with a single step.")
+                .unwrap();
         gadget.handle_event(Event::QuoteReceived(quote));
         assert_eq!(gadget.state, State::DisplayingQuote);
 

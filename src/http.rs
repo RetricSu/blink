@@ -62,8 +62,12 @@ pub fn build_get_request(host: &str, path: &str) -> Result<HString<512>, HttpErr
     validate_http_token(host)?;
     validate_http_token(path)?;
     let mut req = HString::<512>::new();
-    write!(&mut req, "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: blink/0.1\r\n\r\n", path, host)
-        .map_err(|_| HttpError::SendFailed)?;
+    write!(
+        &mut req,
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: blink/0.1\r\n\r\n",
+        path, host
+    )
+    .map_err(|_| HttpError::SendFailed)?;
     Ok(req)
 }
 
@@ -114,6 +118,7 @@ mod inner {
     use super::{build_get_request, parse_http_response, HttpError, HttpResponse};
     use crate::wifi::current_instant;
     use crate::wifi::NetworkStack;
+    use embedded_io::{Read, Write};
     use embedded_tls::blocking::{TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
     use embedded_tls::Aes128GcmSha256;
     use esp_hal::rng::Rng;
@@ -124,6 +129,7 @@ mod inner {
     /// 16 KiB read buffer is required for the TLS handshake (server certificate).
     static mut TLS_READ_BUF: [u8; 16384] = [0; 16384];
     static mut TLS_WRITE_BUF: [u8; 4096] = [0; 4096];
+    static mut HTTP_RAW_BUF: [u8; 2048] = [0; 2048];
 
     /// Wrapper around `esp_hal::rng::Rng` that also implements `CryptoRng`,
     /// which `embedded-tls` requires.
@@ -218,11 +224,12 @@ mod inner {
             }
 
             // 1. DNS resolve
-            let ip = stack
-                .resolve_dns(host)
-                .map_err(|_| HttpError::DnsFailed)?;
+            let ip = stack.resolve_dns(host).map_err(|_| HttpError::DnsFailed)?;
             let now = check_timeout!("dns");
-            info!("HTTP: DNS resolved in {} ms", elapsed_ms(overall_start, now));
+            info!(
+                "HTTP: DNS resolved in {} ms",
+                elapsed_ms(overall_start, now)
+            );
 
             // 2. TCP connect to port 443
             let handle = stack
@@ -234,62 +241,83 @@ mod inner {
                 elapsed_ms(overall_start, now)
             );
 
-            // 3. Create embedded-io bridge + TLS connection
-            let io = stack.tcp_io(handle);
+            let raw_buf = unsafe { &mut *core::ptr::addr_of_mut!(HTTP_RAW_BUF) };
+            let total_result = {
+                // 3. Create embedded-io bridge + TLS connection
+                let io = stack.tcp_io(handle);
 
-            let mut tls = TlsConnection::new(
-                io,
-                unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) },
-                unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) },
-            );
+                let mut tls = TlsConnection::new(
+                    io,
+                    unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) },
+                    unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) },
+                );
 
-            // 4. TLS handshake (no certificate verification — see module docs)
-            info!("HTTP: starting TLS handshake with {}", host);
-            let config = TlsConfig::new().with_server_name(host);
-            debug!("HTTP: TLS config created for {}", host);
-            let rng = CryptoRngWrapper::new();
-            let context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(rng));
+                // 4. TLS handshake (no certificate verification — see module docs)
+                info!("HTTP: starting TLS handshake with {}", host);
+                let config = TlsConfig::new().with_server_name(host);
+                debug!("HTTP: TLS config created for {}", host);
+                let rng = CryptoRngWrapper::new();
+                let context =
+                    TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(rng));
 
-            tls.open(context).map_err(|_| HttpError::TlsFailed)?;
-            let now = check_timeout!("tls_handshake");
-            info!(
-                "HTTP: TLS handshake in {} ms",
-                elapsed_ms(overall_start, now)
-            );
+                let read_result = (|| {
+                    tls.open(context).map_err(|_| HttpError::TlsFailed)?;
+                    let now = check_timeout!("tls_handshake");
+                    info!(
+                        "HTTP: TLS handshake in {} ms",
+                        elapsed_ms(overall_start, now)
+                    );
 
-            // 5. Send HTTP request
-            info!("HTTP: sending GET {} to {}", path, host);
-            let request = build_get_request(host, path)?;
-            tls.write(request.as_bytes())
-                .map_err(|_| HttpError::SendFailed)?;
-            tls.flush().ok();
-            let now = check_timeout!("send");
-            info!("HTTP: request sent in {} ms", elapsed_ms(overall_start, now));
+                    // 5. Send HTTP request
+                    info!("HTTP: sending GET {} to {}", path, host);
+                    let request = build_get_request(host, path)?;
+                    tls.write(request.as_bytes())
+                        .map_err(|_| HttpError::SendFailed)?;
+                    tls.flush().ok();
+                    let now = check_timeout!("send");
+                    info!(
+                        "HTTP: request sent in {} ms",
+                        elapsed_ms(overall_start, now)
+                    );
 
-            // 6. Read response — read until EOF (Connection: close) or buffer full
-            info!("HTTP: reading response...");
-            let mut raw_buf: [u8; 2048] = [0; 2048];
-            let mut total = 0usize;
-            loop {
-                check_timeout!("recv");
-                if total >= raw_buf.len() {
-                    break; // buffer full
-                }
-                let n = match tls.read(&mut raw_buf[total..]) {
-                    Ok(0) => break, // EOF — server closed connection
-                    Ok(n) => {
-                        debug!("HTTP: read {} bytes", n);
-                        n
-                    }
-                    Err(_) => {
-                        // If we already have some data, try to parse it
-                        if total > 0 {
-                            break;
+                    // 6. Read response — read until EOF (Connection: close) or buffer full
+                    info!("HTTP: reading response...");
+                    let mut total = 0usize;
+                    loop {
+                        check_timeout!("recv");
+                        if total >= raw_buf.len() {
+                            break; // buffer full
                         }
-                        return Err(HttpError::RecvFailed);
+                        let n = match tls.read(&mut raw_buf[total..]) {
+                            Ok(0) => break, // EOF — server closed connection
+                            Ok(n) => {
+                                debug!("HTTP: read {} bytes", n);
+                                n
+                            }
+                            Err(_) => {
+                                // If we already have some data, try to parse it
+                                if total > 0 {
+                                    break;
+                                }
+                                return Err(HttpError::RecvFailed);
+                            }
+                        };
+                        total += n;
                     }
-                };
-                total += n;
+
+                    Ok(total)
+                })();
+
+                drop(tls);
+                read_result
+            };
+
+            // 7. Always close TCP socket, including TLS/send/receive failures.
+            stack.tcp_close(handle);
+
+            let total = total_result?;
+            if total == 0 {
+                return Err(HttpError::RecvFailed);
             }
 
             let now = current_instant();
@@ -299,12 +327,118 @@ mod inner {
                 total
             );
 
-            // 7. Drop TLS connection (releases borrow on stack)
-            drop(tls);
+            // 8. Parse HTTP response
+            let result = parse_http_response(&raw_buf[..total], resp_body);
+            let now = current_instant();
+            match result {
+                Ok(ref resp) => info!(
+                    "HTTP: total request time {} ms, status {}",
+                    elapsed_ms(overall_start, now),
+                    resp.status_code
+                ),
+                Err(ref e) => info!(
+                    "HTTP: failed after {} ms: {:?}",
+                    elapsed_ms(overall_start, now),
+                    e
+                ),
+            }
+            result
+        }
 
-            // 8. Close TCP socket
+        /// Perform a plain HTTP **GET** request.
+        ///
+        /// This is used only for public market data endpoints that support
+        /// port 80, where confidentiality is not required.
+        pub fn get_http(
+            &mut self,
+            stack: &mut NetworkStack<'_>,
+            host: &str,
+            path: &str,
+            resp_body: &mut [u8],
+        ) -> Result<HttpResponse, HttpError> {
+            let overall_start = current_instant();
+            let timeout = smoltcp::time::Duration::from_millis(REQUEST_TIMEOUT_MS);
+
+            macro_rules! check_timeout {
+                ($stage:literal) => {{
+                    let now = current_instant();
+                    if now - overall_start > timeout {
+                        info!(
+                            "HTTP: timeout after {} ms at stage {}",
+                            elapsed_ms(overall_start, now),
+                            $stage
+                        );
+                        return Err(HttpError::Timeout);
+                    }
+                    now
+                }};
+            }
+
+            let ip = stack.resolve_dns(host).map_err(|_| HttpError::DnsFailed)?;
+            let now = check_timeout!("dns");
+            info!(
+                "HTTP: DNS resolved in {} ms",
+                elapsed_ms(overall_start, now)
+            );
+
+            let handle = stack
+                .tcp_connect(ip, 80)
+                .map_err(|_| HttpError::ConnectionFailed)?;
+            let now = check_timeout!("tcp_connect");
+            info!(
+                "HTTP: TCP connected in {} ms",
+                elapsed_ms(overall_start, now)
+            );
+
+            let raw_buf = unsafe { &mut *core::ptr::addr_of_mut!(HTTP_RAW_BUF) };
+            let total_result = {
+                let mut io = stack.tcp_io(handle);
+                info!("HTTP: sending GET {} to {}", path, host);
+                let request = build_get_request(host, path)?;
+                let write_result = io
+                    .write(request.as_bytes())
+                    .and_then(|_| io.flush())
+                    .map_err(|_| HttpError::SendFailed);
+                let now = check_timeout!("send");
+                info!(
+                    "HTTP: request sent in {} ms",
+                    elapsed_ms(overall_start, now)
+                );
+
+                let read_result = write_result.and_then(|_| {
+                    info!("HTTP: reading response...");
+                    let mut total = 0usize;
+                    loop {
+                        check_timeout!("recv");
+                        if total >= raw_buf.len() {
+                            break;
+                        }
+                        let n = match io.read(&mut raw_buf[total..]) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                debug!("HTTP: read {} bytes", n);
+                                n
+                            }
+                            Err(_) => {
+                                if total > 0 {
+                                    break;
+                                }
+                                return Err(HttpError::RecvFailed);
+                            }
+                        };
+                        total += n;
+                    }
+
+                    Ok(total)
+                });
+
+                drop(io);
+                read_result
+            };
+
             stack.tcp_close(handle);
 
+            let total = total_result?;
             if total == 0 {
                 return Err(HttpError::RecvFailed);
             }
@@ -349,11 +483,22 @@ mod inner {
             Self
         }
 
-        pub fn get_https(
+        pub fn get_https<S>(
             &mut self,
-            _resp_body: &mut [u8],
+            _stack: &mut S,
             _host: &str,
             _path: &str,
+            _resp_body: &mut [u8],
+        ) -> Result<HttpResponse, HttpError> {
+            Err(HttpError::ConnectionFailed)
+        }
+
+        pub fn get_http<S>(
+            &mut self,
+            _stack: &mut S,
+            _host: &str,
+            _path: &str,
+            _resp_body: &mut [u8],
         ) -> Result<HttpResponse, HttpError> {
             Err(HttpError::ConnectionFailed)
         }
@@ -380,8 +525,11 @@ mod tests {
 
     #[test]
     fn build_get_request_basic() {
-        let req = build_get_request("api.binance.com", "/api/v3/ticker/price?symbol=BTCUSDT").unwrap();
-        assert!(req.as_str().starts_with("GET /api/v3/ticker/price?symbol=BTCUSDT HTTP/1.1\r\n"));
+        let req =
+            build_get_request("api.binance.com", "/api/v3/ticker/price?symbol=BTCUSDT").unwrap();
+        assert!(req
+            .as_str()
+            .starts_with("GET /api/v3/ticker/price?symbol=BTCUSDT HTTP/1.1\r\n"));
         assert!(req.as_str().contains("Host: api.binance.com\r\n"));
         assert!(req.as_str().contains("Connection: close\r\n"));
         assert!(req.as_str().ends_with("\r\n\r\n"));
