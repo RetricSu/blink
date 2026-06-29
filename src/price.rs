@@ -1,8 +1,8 @@
 //! Asset price module for blink.
 //!
-//! Supports BTC, CKB, and Gold (via PAXGUSDT proxy on Binance) for a basic
-//! price-display mode. The module builds Binance API paths, parses the
-//! standard ticker response, and provides a deterministic simulation fallback
+//! Supports BTC and Gold (via PAXGUSDT proxy on Binance) for a basic
+//! price-display mode. The module builds Binance API paths, parses the 24hr
+//! ticker response, and provides a deterministic simulation fallback
 //! because the current HTTP client is HTTP-only while Binance requires HTTPS.
 
 use core::fmt::Write;
@@ -14,7 +14,6 @@ use log::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Asset {
     Btc,
-    Ckb,
     Gold,
 }
 
@@ -23,8 +22,7 @@ impl Asset {
     pub fn index(&self) -> usize {
         match self {
             Asset::Btc => 0,
-            Asset::Ckb => 1,
-            Asset::Gold => 2,
+            Asset::Gold => 1,
         }
     }
 
@@ -32,7 +30,6 @@ impl Asset {
     pub fn binance_symbol(&self) -> &'static str {
         match self {
             Asset::Btc => "BTCUSDT",
-            Asset::Ckb => "CKBUSDT",
             Asset::Gold => "PAXGUSDT",
         }
     }
@@ -41,14 +38,20 @@ impl Asset {
     pub fn display_name(&self) -> &'static str {
         match self {
             Asset::Btc => "BTC",
-            Asset::Ckb => "CKB",
             Asset::Gold => "GOLD",
         }
     }
 }
 
 /// All assets cycled by the price mode, in order.
-pub const ALL_ASSETS: [Asset; 3] = [Asset::Btc, Asset::Ckb, Asset::Gold];
+pub const ALL_ASSETS: [Asset; 2] = [Asset::Btc, Asset::Gold];
+
+/// Live ticker values shown on the OLED.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceQuote {
+    pub price: f64,
+    pub change_percent: f64,
+}
 
 /// Format a price for the 128x32 OLED.
 ///
@@ -66,17 +69,23 @@ pub fn format_price(price: f64) -> HString<128> {
 pub fn format_asset_price(asset: Asset, price: f64) -> HString<128> {
     let mut s = HString::new();
     match asset {
-        Asset::Ckb => write!(&mut s, "{:.4}", price).unwrap(),
         Asset::Btc | Asset::Gold => write!(&mut s, "{:.2}", price).unwrap(),
     }
     s
 }
 
-/// Build the Binance `/api/v3/ticker/price` request path for a symbol.
-pub fn binance_price_path(symbol: &str) -> HString<64> {
+/// Format a 24h change percentage for the OLED status area.
+pub fn format_change_percent(change_percent: f64) -> HString<16> {
+    let mut s = HString::new();
+    write!(&mut s, "{:+.1}%", change_percent).unwrap();
+    s
+}
+
+/// Build the Binance `/api/v3/ticker/24hr` request path for a symbol.
+pub fn binance_24hr_path(symbol: &str) -> HString<64> {
     let mut s = HString::new();
     // The path is bounded by the fixed prefix and a 20-character symbol.
-    write!(&mut s, "/api/v3/ticker/price?symbol={}", symbol).unwrap();
+    write!(&mut s, "/api/v3/ticker/24hr?symbol={}", symbol).unwrap();
     s
 }
 
@@ -119,6 +128,56 @@ pub fn parse_price_json(body: &str) -> Option<f64> {
             s = &s[1..];
         } else if s.starts_with('}') {
             return None;
+        } else {
+            return None;
+        }
+    }
+}
+
+/// Parse Binance 24hr ticker response fields used by the display.
+pub fn parse_24hr_ticker_json(body: &str) -> Option<PriceQuote> {
+    let mut s = body.trim_start();
+    if !s.starts_with('{') {
+        return None;
+    }
+    s = &s[1..];
+
+    let mut price = None;
+    let mut change_percent = None;
+
+    loop {
+        s = s.trim_start();
+        if s.starts_with('}') || s.is_empty() {
+            return Some(PriceQuote {
+                price: price?,
+                change_percent: change_percent?,
+            });
+        }
+
+        let key = parse_json_string(&mut s)?;
+        s = s.trim_start();
+        if !s.starts_with(':') {
+            return None;
+        }
+        s = &s[1..];
+        s = s.trim_start();
+
+        if key == "lastPrice" {
+            price = parse_json_string(&mut s)?.parse().ok();
+        } else if key == "priceChangePercent" {
+            change_percent = parse_json_string(&mut s)?.parse().ok();
+        } else {
+            skip_json_value(&mut s)?;
+        }
+
+        s = s.trim_start();
+        if s.starts_with(',') {
+            s = &s[1..];
+        } else if s.starts_with('}') {
+            return Some(PriceQuote {
+                price: price?,
+                change_percent: change_percent?,
+            });
         } else {
             return None;
         }
@@ -254,8 +313,9 @@ fn skip_json_value(s: &mut &str) -> Option<()> {
 /// Simulated prices used while the device HTTP client is HTTP-only.
 /// These values are deterministic stand-ins for real Binance ticker prices.
 const SIMULATED_BTC_PRICE: f64 = 65432.10;
-const SIMULATED_CKB_PRICE: f64 = 0.0123;
+const SIMULATED_BTC_CHANGE_PERCENT: f64 = 1.5;
 const SIMULATED_GOLD_PRICE: f64 = 2345.67;
+const SIMULATED_GOLD_CHANGE_PERCENT: f64 = -0.3;
 
 /// Deterministic simulated price for the given asset.
 ///
@@ -264,8 +324,15 @@ const SIMULATED_GOLD_PRICE: f64 = 2345.67;
 pub fn simulate_fetch_price(asset: Asset) -> f64 {
     match asset {
         Asset::Btc => SIMULATED_BTC_PRICE,
-        Asset::Ckb => SIMULATED_CKB_PRICE,
         Asset::Gold => SIMULATED_GOLD_PRICE,
+    }
+}
+
+/// Deterministic simulated 24h percentage change for the given asset.
+pub fn simulate_fetch_change_percent(asset: Asset) -> f64 {
+    match asset {
+        Asset::Btc => SIMULATED_BTC_CHANGE_PERCENT,
+        Asset::Gold => SIMULATED_GOLD_CHANGE_PERCENT,
     }
 }
 
@@ -314,13 +381,13 @@ const BINANCE_API_ENDPOINTS: [BinanceEndpoint; 4] = [
 pub fn fetch_price(
     stack: &mut crate::wifi::NetworkStack<'_>,
     asset: Asset,
-) -> Result<f64, FetchError> {
+) -> Result<PriceQuote, FetchError> {
     use crate::http::HttpClient;
     use log::info;
 
     info!("Price: fetching {} price", asset.display_name());
 
-    let path = binance_price_path(asset.binance_symbol());
+    let path = binance_24hr_path(asset.binance_symbol());
     let mut last_error = FetchError::ParseError;
 
     for endpoint in BINANCE_API_ENDPOINTS {
@@ -328,7 +395,7 @@ pub fn fetch_price(
         info!("Price: fetching from {}://{}", scheme, endpoint.host);
 
         let mut client = HttpClient::new();
-        let mut body_buf = [0u8; 256];
+        let mut body_buf = [0u8; 4096];
         let result = if endpoint.tls {
             client.get_https(stack, endpoint.host, &path, &mut body_buf)
         } else {
@@ -378,9 +445,16 @@ pub fn fetch_price(
             }
         };
 
-        match parse_price_json(body) {
-            Some(price) => return Ok(price),
-            None => last_error = FetchError::ParseError,
+        match parse_24hr_ticker_json(body) {
+            Some(quote) => return Ok(quote),
+            None => {
+                info!(
+                    "Price: failed to parse {} 24hr ticker body ({} bytes)",
+                    asset.display_name(),
+                    resp.body_len
+                );
+                last_error = FetchError::ParseError;
+            }
         }
     }
 
@@ -398,12 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn ckb_symbol_and_name() {
-        assert_eq!(Asset::Ckb.binance_symbol(), "CKBUSDT");
-        assert_eq!(Asset::Ckb.display_name(), "CKB");
-    }
-
-    #[test]
     fn gold_uses_paxg_proxy() {
         assert_eq!(Asset::Gold.binance_symbol(), "PAXGUSDT");
         assert_eq!(Asset::Gold.display_name(), "GOLD");
@@ -416,15 +484,39 @@ mod tests {
     }
 
     #[test]
-    fn format_asset_price_keeps_small_ckb_values_visible() {
-        let s = format_asset_price(Asset::Ckb, 0.0042);
-        assert_eq!(s.as_str(), "0.0042");
+    fn format_asset_price_rounds_to_two_decimals() {
+        let s = format_asset_price(Asset::Gold, 2345.678);
+        assert_eq!(s.as_str(), "2345.68");
     }
 
     #[test]
-    fn binance_price_path_includes_symbol() {
-        let path = binance_price_path("BTCUSDT");
-        assert_eq!(path.as_str(), "/api/v3/ticker/price?symbol=BTCUSDT");
+    fn format_change_percent_shows_sign_and_one_decimal() {
+        assert_eq!(format_change_percent(1.54).as_str(), "+1.5%");
+        assert_eq!(format_change_percent(-0.34).as_str(), "-0.3%");
+    }
+
+    #[test]
+    fn binance_24hr_path_includes_symbol() {
+        let path = binance_24hr_path("BTCUSDT");
+        assert_eq!(path.as_str(), "/api/v3/ticker/24hr?symbol=BTCUSDT");
+    }
+
+    #[test]
+    fn parse_24hr_ticker_response() {
+        let body = r#"{"symbol":"BTCUSDT","priceChange":"987.65","priceChangePercent":"1.534","lastPrice":"65432.10"}"#;
+        assert_eq!(
+            parse_24hr_ticker_json(body),
+            Some(PriceQuote {
+                price: 65432.10,
+                change_percent: 1.534,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_24hr_ticker_requires_both_fields() {
+        let body = r#"{"symbol":"BTCUSDT","lastPrice":"65432.10"}"#;
+        assert_eq!(parse_24hr_ticker_json(body), None);
     }
 
     #[test]
@@ -474,14 +566,12 @@ mod tests {
     #[test]
     fn asset_index_matches_all_assets_order() {
         assert_eq!(Asset::Btc.index(), 0);
-        assert_eq!(Asset::Ckb.index(), 1);
-        assert_eq!(Asset::Gold.index(), 2);
+        assert_eq!(Asset::Gold.index(), 1);
     }
 
     #[test]
     fn simulation_returns_nonzero_prices() {
         assert!(simulate_fetch_price(Asset::Btc) > 0.0);
-        assert!(simulate_fetch_price(Asset::Ckb) > 0.0);
         assert!(simulate_fetch_price(Asset::Gold) > 0.0);
     }
 }

@@ -9,7 +9,10 @@ use core::fmt::Write;
 use heapless::String as HString;
 use heapless::Vec as HVec;
 use log::info;
-use price::{format_asset_price, simulate_fetch_price, Asset, ALL_ASSETS};
+use price::{
+    format_asset_price, format_change_percent, simulate_fetch_change_percent, simulate_fetch_price,
+    Asset, ALL_ASSETS,
+};
 
 // 1. Define your States and Events as enums
 #[derive(Debug, Clone, PartialEq)]
@@ -29,7 +32,7 @@ pub enum Event {
     FetchFailed,
     CountdownTick,
     CountdownFinished,
-    PriceReceived(HString<128>),
+    PriceReceived(HString<128>, HString<16>),
     PriceFetchFailed,
     AssetTick,
 }
@@ -45,6 +48,7 @@ pub struct SmartGadget {
     pub quote_line_offset: usize, // For scrolling through long quotes
     pub current_asset: Asset,
     pub current_price: Option<HString<128>>,
+    pub current_change_percent: Option<HString<16>>,
 }
 
 // 3. Implement a method to handle events
@@ -75,6 +79,7 @@ impl SmartGadget {
             quote_line_offset: 0,
             current_asset: Asset::Btc,
             current_price: None,
+            current_change_percent: None,
         }
     }
 
@@ -107,8 +112,9 @@ impl SmartGadget {
             }
 
             // If we're fetching a price and it arrives...
-            (State::FetchingPrice, Event::PriceReceived(price)) => {
+            (State::FetchingPrice, Event::PriceReceived(price, change_percent)) => {
                 self.current_price = Some(price);
+                self.current_change_percent = Some(change_percent);
                 self.state = State::DisplayingPrice;
                 // ACTION: Display the price on the screen
             }
@@ -130,6 +136,7 @@ impl SmartGadget {
             (State::DisplayingPrice, Event::AssetTick) => {
                 self.cycle_asset();
                 self.current_price = None; // Clear stale price before fetching the next asset
+                self.current_change_percent = None;
                 self.state = State::FetchingPrice;
                 // ACTION: Fetch next asset price
             }
@@ -208,7 +215,9 @@ impl SmartGadget {
     pub fn simulate_price_fetch(&mut self) {
         let price = simulate_fetch_price(self.current_asset);
         let formatted = format_asset_price(self.current_asset, price);
-        self.handle_event(Event::PriceReceived(formatted));
+        let change_percent = simulate_fetch_change_percent(self.current_asset);
+        let formatted_change = format_change_percent(change_percent);
+        self.handle_event(Event::PriceReceived(formatted, formatted_change));
     }
 }
 
@@ -625,9 +634,11 @@ mod tests {
         let mut gadget = SmartGadget::new();
         gadget.state = State::FetchingPrice;
         let price = HString::<128>::try_from("65432.10").unwrap();
-        gadget.handle_event(Event::PriceReceived(price.clone()));
+        let change_percent = HString::<16>::try_from("+1.5%").unwrap();
+        gadget.handle_event(Event::PriceReceived(price.clone(), change_percent.clone()));
         assert_eq!(gadget.state, State::DisplayingPrice);
         assert_eq!(gadget.current_price, Some(price));
+        assert_eq!(gadget.current_change_percent, Some(change_percent));
     }
 
     #[test]
@@ -654,8 +665,9 @@ mod tests {
         gadget.state = State::DisplayingPrice;
         gadget.current_price = Some(HString::<128>::try_from("65432.10").unwrap());
         gadget.handle_event(Event::AssetTick);
-        assert_eq!(gadget.current_asset, Asset::Ckb);
+        assert_eq!(gadget.current_asset, Asset::Gold);
         assert!(gadget.current_price.is_none());
+        assert!(gadget.current_change_percent.is_none());
         assert_eq!(gadget.state, State::FetchingPrice);
     }
 
