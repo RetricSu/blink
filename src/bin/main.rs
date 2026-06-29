@@ -51,9 +51,8 @@ const LABEL_X: i32 = 2;
 const LABEL_Y: i32 = 7;
 
 /// Top-right position of the status label.
-const STATUS_TEXT: &str = "LIVE";
-const STATUS_X: i32 = SCREEN_WIDTH - (STATUS_TEXT.len() as i32 * 5) - 2;
 const STATUS_Y: i32 = LABEL_Y;
+const STATUS_FONT_WIDTH: i32 = 5;
 
 /// Horizontal rule separating the status line from the price.
 const HEADER_RULE_Y: i32 = 10;
@@ -65,6 +64,7 @@ fn draw_price_screen<D>(
     display: &mut D,
     asset_label: &str,
     price_text: &str,
+    status_text: &str,
     label_style: MonoTextStyle<'_, BinaryColor>,
     price_style: MonoTextStyle<'_, BinaryColor>,
 ) where
@@ -81,8 +81,9 @@ fn draw_price_screen<D>(
         info!("Failed to draw asset label: {:?}", e);
     }
 
+    let status_x = SCREEN_WIDTH - (status_text.len() as i32 * STATUS_FONT_WIDTH) - 2;
     if let Err(e) =
-        Text::new(STATUS_TEXT, Point::new(STATUS_X, STATUS_Y), label_style).draw(display)
+        Text::new(status_text, Point::new(status_x, STATUS_Y), label_style).draw(display)
     {
         info!("Failed to draw status label: {:?}", e);
     }
@@ -101,6 +102,29 @@ fn draw_price_screen<D>(
     let price_x = (SCREEN_WIDTH - price_width) / 2;
     if let Err(e) = Text::new(price_text, Point::new(price_x, PRICE_Y), price_style).draw(display) {
         info!("Failed to draw price: {:?}", e);
+    }
+}
+
+fn draw_status_screen<D>(
+    display: &mut D,
+    line1: &str,
+    line2: &str,
+    text_style: MonoTextStyle<'_, BinaryColor>,
+) where
+    D: DrawTarget<Color = BinaryColor>,
+    D::Error: core::fmt::Debug,
+{
+    if let Err(e) = display.clear(BinaryColor::Off) {
+        info!("Failed to clear display: {:?}", e);
+        return;
+    }
+
+    if let Err(e) = Text::new(line1, Point::new(0, 12), text_style).draw(display) {
+        info!("Failed to draw status line 1: {:?}", e);
+    }
+
+    if let Err(e) = Text::new(line2, Point::new(0, 26), text_style).draw(display) {
+        info!("Failed to draw status line 2: {:?}", e);
     }
 }
 
@@ -411,32 +435,50 @@ fn main() -> ! {
                 // ── Real fetch (network feature) vs simulation ──
                 #[cfg(feature = "network")]
                 {
-                    let fetched = if let Some(ref mut stack) = network_stack {
-                        if stack.is_network_ready() {
-                            match fetch_price(stack, gadget.current_asset) {
-                                Ok(price) => {
-                                    let formatted = blink::price::format_asset_price(
-                                        gadget.current_asset,
-                                        price,
-                                    );
-                                    gadget.handle_event(Event::PriceReceived(formatted));
-                                    true
-                                }
-                                Err(e) => {
-                                    info!("Price fetch failed: {:?}, using simulation", e);
-                                    false
-                                }
+                    if let Some(ref mut stack) = network_stack {
+                        if !stack.is_network_ready() {
+                            draw_status_screen(
+                                &mut display,
+                                "WiFi not ready",
+                                "Retrying...",
+                                text_style,
+                            );
+                            flush_display!(display, delay, "wifi not ready");
+                            delay.delay_millis(1000);
+                            continue;
+                        }
+
+                        match fetch_price(stack, gadget.current_asset) {
+                            Ok(quote) => {
+                                let formatted = blink::price::format_asset_price(
+                                    gadget.current_asset,
+                                    quote.price,
+                                );
+                                let formatted_change =
+                                    blink::price::format_change_percent(quote.change_percent);
+                                gadget.handle_event(Event::PriceReceived(
+                                    formatted,
+                                    formatted_change,
+                                ));
                             }
-                        } else {
-                            false
+                            Err(e) => {
+                                info!("Price fetch failed: {:?}, retrying", e);
+                                draw_status_screen(
+                                    &mut display,
+                                    gadget.current_asset.display_name(),
+                                    "API ERR",
+                                    text_style,
+                                );
+                                flush_display!(display, delay, "api error");
+                                delay.delay_millis(2000);
+                                continue;
+                            }
                         }
                     } else {
-                        false
-                    };
-
-                    if !fetched {
-                        delay.delay_millis(800);
-                        gadget.simulate_price_fetch();
+                        draw_status_screen(&mut display, "WiFi init err", "Check logs", text_style);
+                        flush_display!(display, delay, "wifi init error");
+                        delay.delay_millis(2000);
+                        continue;
                     }
                 }
 
@@ -453,10 +495,13 @@ fn main() -> ! {
                 if price_dirty {
                     info!("Displaying price: {:?}", gadget.current_price);
                     let price_text: &str = gadget.current_price.as_deref().unwrap_or("--");
+                    let change_text: &str =
+                        gadget.current_change_percent.as_deref().unwrap_or("--");
                     draw_price_screen(
                         &mut display,
                         gadget.current_asset.display_name(),
                         price_text,
+                        change_text,
                         label_style,
                         price_style,
                     );

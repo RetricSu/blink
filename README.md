@@ -73,13 +73,13 @@ espflash flash --monitor --port /dev/cu.usbmodem113101 target/riscv32imc-unknown
 ## Usage
 
 The current firmware runs as a small price ticker. After WiFi connects, it
-cycles through BTC, CKB, and Gold prices, keeping the previous price visible
-until the next live quote has loaded.
+cycles through BTC and Gold prices with 24h percentage change, keeping the
+previous quote visible until the next live quote has loaded.
 
 The 128x32 OLED uses a compact market-card layout:
 
 ```text
-BTC                         LIVE
+BTC                        +1.5%
 ────────────────────────────────
         60120.01
 ```
